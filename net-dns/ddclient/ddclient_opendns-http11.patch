@@ -1,0 +1,22 @@
+diff -rupN ddclient-3.9.0-orig/ddclient ddclient-3.9.0/ddclient
+--- ddclient-3.9.0-orig/ddclient	2018-08-09 10:58:16.000000000 -0500
++++ ddclient-3.9.0/ddclient	2019-02-26 20:17:25.516129682 -0600
+@@ -2010,8 +2010,16 @@ sub geturl {
+ 
+     $request  = "$method ";
+     $request .= "http://$server" if $proxy;
+-    $request .= "/$url HTTP/1.0\n";
+-    $request .= "Host: $server\n";
++	
++	## determine if HTTP/1.1 is needed in request
++	my @http11hosts = qw/updates.opendns.com/;
++	if ( scalar grep $server eq $_, @http11hosts ) {
++		$request .= "/$url HTTP/1.1\n";
++	} else {
++		$request .= "/$url HTTP/1.0\n";
++	}
++	
++	$request .= "Host: $server\n";
+ 
+     my $auth = encode_base64("${login}:${password}", "");
+     $request .= "Authorization: Basic $auth\n" if $login || $password;
