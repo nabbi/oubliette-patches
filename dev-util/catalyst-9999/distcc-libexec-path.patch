@@ -1,0 +1,35 @@
+# testing distcc pathing using /usr/libexec vs lib/lib64
+#https://bugs.gentoo.org/782040
+
+diff --git a/targets/support/chroot-functions.sh b/targets/support/chroot-functions.sh
+index d8472d46..8ab5967d 100755
+--- a/targets/support/chroot-functions.sh
++++ b/targets/support/chroot-functions.sh
+@@ -83,10 +83,10 @@ setup_features() {
+ 		# This sets up automatic cross-distcc-fu according to
+ 		# https://wiki.gentoo.org/wiki/Distcc/Cross-Compiling
+ 		CHOST=$(portageq envvar CHOST)
+-		cd /usr/lib/distcc/bin
++		cd /usr/libexec/distcc/bin
+ 		rm cc gcc g++ c++ 2>/dev/null
+-		echo -e '#!/bin/bash\nexec /usr/lib/distcc/bin/'${CHOST}'-g${0:$[-2]} "$@"' > ${CHOST}-wrapper
+-		chmod a+x /usr/lib/distcc/bin/${CHOST}-wrapper
++		echo -e '#!/bin/bash\nexec /usr/libexec/distcc/bin/'${CHOST}'-g${0:$[-2]} "$@"' > ${CHOST}-wrapper
++		chmod a+x /usr/libexec/distcc/bin/${CHOST}-wrapper
+ 		for i in cc gcc g++ c++; do ln -s ${CHOST}-wrapper ${i}; done
+ 	fi
+ 
+@@ -172,10 +172,10 @@ setup_gcc(){
+ cleanup_distcc() {
+ 	rm -f /etc/distcc/hosts
+ 	for i in cc gcc c++ g++; do
+-		rm -f /usr/lib/distcc/bin/${i}
+-		ln -s /usr/bin/distcc /usr/lib/distcc/bin/${i}
++		rm -f /usr/libexec/distcc/bin/${i}
++		ln -s /usr/bin/distcc /usr/libexec/distcc/bin/${i}
+ 	done
+-	rm -f /usr/lib/distcc/bin/*-wrapper
++	rm -f /usr/libexec/distcc/bin/*-wrapper
+ }
+ 
+ cleanup_icecream() {
