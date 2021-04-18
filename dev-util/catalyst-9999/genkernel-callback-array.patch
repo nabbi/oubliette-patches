@@ -1,0 +1,24 @@
+# there is an escaping issue when the array is defreferenced with @
+# I suspect there is a double-qoute (") prefacing the array expresion which
+# sends the first argument to genkernel instead of emerge (via --callback)
+#
+# --callback=emerge -qN -kb sys-fs/zfs-kmod
+# ERROR: Unknown option '-qN'!
+#
+# restores old behavior of using string witin gk callback argument
+# https://github.com/gentoo/catalyst/commit/e5855beff25ac9315c1dfe5466bb4b0bb2240fa6
+
+diff --git a/targets/support/kmerge.sh b/targets/support/kmerge.sh
+index fb67aba6..20b471f1 100755
+--- a/targets/support/kmerge.sh
++++ b/targets/support/kmerge.sh
+@@ -60,7 +60,8 @@ genkernel_compile() {
+ 	fi
+ 
+ 	if [[ -n ${kernel_merge} ]]; then
+-		genkernel --callback="emerge ${gk_callback_opts[@]} ${kernel_merge}" \
++		gk_callback=${gk_callback_opts[@]}
++		genkernel --callback="emerge ${gk_callback} ${kernel_merge}" \
+ 			"${GK_ARGS[@]}" || exit 1
+ 	else
+ 		genkernel "${GK_ARGS[@]}" || exit 1
