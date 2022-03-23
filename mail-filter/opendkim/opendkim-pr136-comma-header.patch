@@ -1,0 +1,14 @@
+# https://github.com/trusteddomainproject/OpenDKIM/pull/136
+diff --git a/opendkim/opendkim.c b/opendkim/opendkim.c
+index 803f37b0..c9dd782d 100644
+--- a/opendkim/opendkim.c
++++ b/opendkim/opendkim.c
+@@ -10766,7 +10766,7 @@ dkimf_ar_all_sigs(char *hdr, size_t hdrlen, struct dkimf_dstring *tmpstr,
+  				                     " (%u-bit key%s%s)",
+  				                     keybits,
+  				                     dnssec == NULL ? ""
+- 				                                    : "; ",
++ 				                                    : ", ",
+  				                     dnssec == NULL ? ""
+  				                                    : dnssec);
+  			}
