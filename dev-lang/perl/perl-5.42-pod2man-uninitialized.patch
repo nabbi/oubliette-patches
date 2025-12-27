@@ -8,16 +8,14 @@
 # Use of uninitialized value in numeric gt (>) at /usr/lib64/perl5/5.42/ExtUtils/Command/MM.pm line 147.
 #
 diff --git a/cpan/ExtUtils-MakeMaker/lib/ExtUtils/Command/MM.pm b/cpan/ExtUtils-MakeMaker/lib/ExtUtils/Command/MM.pm
-index 89f4c16ded..8c0fbd1df8 100644
+index 89f4c16ded..d8a0b3b426 100644
 --- a/cpan/ExtUtils-MakeMaker/lib/ExtUtils/Command/MM.pm
 +++ b/cpan/ExtUtils-MakeMaker/lib/ExtUtils/Command/MM.pm
-@@ -145,8 +145,8 @@ sub pod2man {
-         my ($pod, $man) = splice(@ARGV, 0, 2);
+@@ -146,7 +146,7 @@ sub pod2man {
  
          next if ((-e $man) &&
--                 (mtime($man) > mtime($pod)) &&
+                  (mtime($man) > mtime($pod)) &&
 -                 (mtime($man) > mtime("Makefile")));
-+                 (mtime($man) > (mtime($pod) // 0)) &&
 +                 (mtime($man) > (mtime("Makefile") // 0)) );
  
          my $parser = Pod::Man->new(%options);
