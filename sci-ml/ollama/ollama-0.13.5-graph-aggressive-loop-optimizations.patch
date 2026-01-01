@@ -1,0 +1,50 @@
+llama-graph: fix UB warning from cross-attn mask loop indices
+
+GCC emits the following warning when building with optimizations:
+
+  llama-graph.cpp:473:9: warning: iteration 2147483645 invokes undefined
+  behavior [-Waggressive-loop-optimizations]
+
+The warning is caused by using int loop induction variables against
+int64_t bounds (n_tokens, n_enc), which allows signed overflow in the
+induction variable and enables undefined behavior.
+
+This change widens the loop counters to int64_t to match the bounds and
+removes an unreachable loop of the form:
+
+  for (i = n_tokens; i < n_tokens; ++i)
+
+which could never execute.
+
+No functional behavior is changed.
+
+diff --git a/llama/llama.cpp/src/llama-graph.cpp b/llama/llama.cpp/src/llama-graph.cpp
+index 1d0d7197..3b543e66 100644
+--- a/llama/llama.cpp/src/llama-graph.cpp
++++ b/llama/llama.cpp/src/llama-graph.cpp
+@@ -453,9 +453,9 @@ void llm_graph_input_attn_cross::set_input(const llama_ubatch * ubatch) {
+ 
+     float * data = (float *) cross_kq_mask->data;
+ 
+-    for (int h = 0; h < 1; ++h) {
+-        for (int i = 0; i < n_tokens; ++i) {
+-            for (int j = 0; j < n_enc; ++j) {
++    for (int64_t h = 0; h < 1; ++h) {
++        for (int64_t i = 0; i < n_tokens; ++i) {
++            for (int64_t j = 0; j < n_enc; ++j) {
+                 float f = -INFINITY;
+ 
+                 for (int s = 0; s < ubatch->n_seq_id[i]; ++s) {
+@@ -469,12 +469,6 @@ void llm_graph_input_attn_cross::set_input(const llama_ubatch * ubatch) {
+                 data[h*(n_enc*n_tokens) + i*n_enc + j] = f;
+             }
+         }
+-
+-        for (int i = n_tokens; i < n_tokens; ++i) {
+-            for (int j = 0; j < n_enc; ++j) {
+-                data[h*(n_enc*n_tokens) + i*n_enc + j] = -INFINITY;
+-            }
+-        }
+     }
+ }
+ 
