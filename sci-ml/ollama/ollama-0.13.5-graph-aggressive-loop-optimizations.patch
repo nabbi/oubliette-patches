@@ -1,7 +1,7 @@
-diff --git a/src/llama-batch.cpp b/src/llama-batch.cpp
+diff --git a/llama/llama.cpp/src/llama-batch.cpp b/src/llama-batch.cpp
 index 386fab04..8facd21e 100644
---- a/src/llama-batch.cpp
-+++ b/src/llama-batch.cpp
+--- a/llama/llama.cpp/src/llama-batch.cpp
++++ b/llama/llama.cpp/src/llama-batch.cpp
 @@ -720,7 +720,7 @@ llama_ubatch llama_batch_allocr::ubatch_add(const std::vector<int32_t> & idxs, u
          udata->n_seq_id[i] = batch.n_seq_id[idxs[i]];
          udata->output[i]   = batch.logits[idxs[i]];
@@ -49,10 +49,10 @@ index 386fab04..8facd21e 100644
              free(batch.seq_id[i]);
          }
          free(batch.seq_id);
-diff --git a/src/llama-graph.cpp b/src/llama-graph.cpp
+diff --git a/llama/llama.cpp/src/llama-graph.cpp b/src/llama-graph.cpp
 index 1d0d7197..6dd38e4a 100644
---- a/src/llama-graph.cpp
-+++ b/src/llama-graph.cpp
+--- a/llama/llama.cpp/src/llama-graph.cpp
++++ b/llama/llama.cpp/src/llama-graph.cpp
 @@ -46,7 +46,7 @@ void llm_graph_input_pos::set_input(const llama_ubatch * ubatch) {
              // the 3 first dims are the same, and 4th dim is all 0
              std::vector<llama_pos> pos_data(n_tokens*n_pos_per_embd);
@@ -255,10 +255,10 @@ index 1d0d7197..6dd38e4a 100644
          moe_out = ggml_add(ctx0, moe_out, cur_experts[i]);
      }
  
-diff --git a/src/llama-kv-cache.cpp b/src/llama-kv-cache.cpp
+diff --git a/llama/llama.cpp/src/llama-kv-cache.cpp b/src/llama-kv-cache.cpp
 index 3186242d..403513ab 100644
---- a/src/llama-kv-cache.cpp
-+++ b/src/llama-kv-cache.cpp
+--- a/llama/llama.cpp/src/llama-kv-cache.cpp
++++ b/llama/llama.cpp/src/llama-kv-cache.cpp
 @@ -1335,8 +1335,8 @@ void llama_kv_cache::set_input_pos_bucket(ggml_tensor * dst, const llama_ubatch
      const int32_t n_kv = dst->ne[0];
  
