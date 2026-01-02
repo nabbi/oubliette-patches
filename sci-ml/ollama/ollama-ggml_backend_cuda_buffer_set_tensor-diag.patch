@@ -1,5 +1,5 @@
 diff --git a/ml/backend/ggml/ggml/src/ggml-cuda/ggml-cuda.cu b/ml/backend/ggml/ggml/src/ggml-cuda/ggml-cuda.cu
-index 5c9dfd03..03cae397 100644
+index 5c9dfd03..3429a1c3 100644
 --- a/ml/backend/ggml/ggml/src/ggml-cuda/ggml-cuda.cu
 +++ b/ml/backend/ggml/ggml/src/ggml-cuda/ggml-cuda.cu
 @@ -79,6 +79,7 @@
@@ -10,7 +10,7 @@ index 5c9dfd03..03cae397 100644
  
  static_assert(sizeof(half) == sizeof(ggml_fp16_t), "wrong fp16 size");
  
-@@ -749,8 +750,98 @@ static void ggml_backend_cuda_buffer_set_tensor(ggml_backend_buffer_t buffer, gg
+@@ -749,8 +750,111 @@ static void ggml_backend_cuda_buffer_set_tensor(ggml_backend_buffer_t buffer, gg
      ggml_backend_cuda_buffer_context * ctx = (ggml_backend_cuda_buffer_context *)buffer->context;
  
      ggml_cuda_set_device(ctx->device);
@@ -18,6 +18,19 @@ index 5c9dfd03..03cae397 100644
 -    CUDA_CHECK(cudaStreamSynchronize(cudaStreamPerThread));
 +
 +    // ---- DIAG ----
++    {
++        CUcontext c = NULL;
++        CUresult cr = cuCtxGetCurrent(&c);
++        if (cr != CUDA_SUCCESS || c == NULL) {
++            const char *en = "unknown";
++            const char *es = "unknown";
++            cuGetErrorName(cr, &en);
++            cuGetErrorString(cr, &es);
++            fprintf(stderr, "[GGML-CUDA-DIAG] cuCtxGetCurrent BAD cr=%d %s %s ctx=%p\n",
++                    (int)cr, en, es, (void*)c);
++        }
++    }
++
 +    {
 +        int cur_dev = -1;
 +        cudaGetDevice(&cur_dev);
