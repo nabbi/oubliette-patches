@@ -1,5 +1,5 @@
 diff --git a/ml/backend/ggml/ggml/src/ggml-cuda/ggml-cuda.cu b/ml/backend/ggml/ggml/src/ggml-cuda/ggml-cuda.cu
-index 5c9dfd03..3c3330a1 100644
+index 5c9dfd03..96247b95 100644
 --- a/ml/backend/ggml/ggml/src/ggml-cuda/ggml-cuda.cu
 +++ b/ml/backend/ggml/ggml/src/ggml-cuda/ggml-cuda.cu
 @@ -79,6 +79,7 @@
@@ -10,14 +10,12 @@ index 5c9dfd03..3c3330a1 100644
  
  static_assert(sizeof(half) == sizeof(ggml_fp16_t), "wrong fp16 size");
  
-@@ -97,14 +98,22 @@ void ggml_cuda_error(const char * stmt, const char * func, const char * file, in
+@@ -97,14 +98,20 @@ void ggml_cuda_error(const char * stmt, const char * func, const char * file, in
  // this is faster on Windows
  // probably because the Windows CUDA libraries forget to make this check before invoking the drivers
  void ggml_cuda_set_device(int device) {
 -    int current_device;
-+    // Per-thread: remember which device we've already forced a context attach for.
-+    // If you only ever use one device, this is enough.
-+    thread_local int tls_inited_device = -1;
++    thread_local unsigned long long tls_inited_mask = 0ULL;
 +
 +    int current_device = -1;
      CUDA_CHECK(cudaGetDevice(&current_device));
@@ -29,15 +27,15 @@ index 5c9dfd03..3c3330a1 100644
      }
  
 -    CUDA_CHECK(cudaSetDevice(device));
-+    // Force context creation/attachment only once per thread per device.
-+    if (tls_inited_device != device) {
++    const unsigned long long bit = 1ULL << device;
++    if ((tls_inited_mask & bit) == 0) {
 +        CUDA_CHECK(cudaFree(0));
-+        tls_inited_device = device;
++        tls_inited_mask |= bit;
 +    }
  }
  
  int ggml_cuda_get_device() {
-@@ -749,6 +758,108 @@ static void ggml_backend_cuda_buffer_set_tensor(ggml_backend_buffer_t buffer, gg
+@@ -749,6 +756,108 @@ static void ggml_backend_cuda_buffer_set_tensor(ggml_backend_buffer_t buffer, gg
      ggml_backend_cuda_buffer_context * ctx = (ggml_backend_cuda_buffer_context *)buffer->context;
  
      ggml_cuda_set_device(ctx->device);
