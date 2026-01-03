@@ -1,8 +1,8 @@
 diff --git a/ml/backend/ggml/ggml/src/ggml-cuda/ggml-cuda.cu b/ml/backend/ggml/ggml/src/ggml-cuda/ggml-cuda.cu
-index 5c9dfd03..304e81f7 100644
+index 5c9dfd03..5ed565a8 100644
 --- a/ml/backend/ggml/ggml/src/ggml-cuda/ggml-cuda.cu
 +++ b/ml/backend/ggml/ggml/src/ggml-cuda/ggml-cuda.cu
-@@ -749,6 +749,101 @@ static void ggml_backend_cuda_buffer_set_tensor(ggml_backend_buffer_t buffer, gg
+@@ -749,6 +749,103 @@ static void ggml_backend_cuda_buffer_set_tensor(ggml_backend_buffer_t buffer, gg
      ggml_backend_cuda_buffer_context * ctx = (ggml_backend_cuda_buffer_context *)buffer->context;
  
      ggml_cuda_set_device(ctx->device);
@@ -19,7 +19,8 @@ index 5c9dfd03..304e81f7 100644
 +            fprintf(stderr, "[GGML-CUDA-DIAG] cuCtxGetCurrent BAD cr=%d %s %s ctx=%p\n",
 +                    (int)cr, en, es, (void*)c);
 +        }
-+
++    }
++    {
 +        int cur_dev = -1;
 +        cudaGetDevice(&cur_dev);
 +
@@ -62,7 +63,8 @@ index 5c9dfd03..304e81f7 100644
 +            fprintf(stderr, "[GGML-CUDA-DIAG] prior cudaGetLastError=%d(%s)\n",
 +                (int) elast, cudaGetErrorString(elast));
 +        }
-+
++    }
++    {
 +    // ---- DIAG: allocation bounds for dst1 ----
 +        CUdeviceptr p = (CUdeviceptr) ((char *) tensor->data + offset);
 +        CUdeviceptr base = 0;
