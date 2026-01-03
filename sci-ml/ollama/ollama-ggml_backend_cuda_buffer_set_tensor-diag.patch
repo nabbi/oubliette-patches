@@ -1,5 +1,5 @@
 diff --git a/ml/backend/ggml/ggml/src/ggml-cuda/ggml-cuda.cu b/ml/backend/ggml/ggml/src/ggml-cuda/ggml-cuda.cu
-index 5c9dfd03..3429a1c3 100644
+index 5c9dfd03..99323bb8 100644
 --- a/ml/backend/ggml/ggml/src/ggml-cuda/ggml-cuda.cu
 +++ b/ml/backend/ggml/ggml/src/ggml-cuda/ggml-cuda.cu
 @@ -79,6 +79,7 @@
@@ -10,12 +10,26 @@ index 5c9dfd03..3429a1c3 100644
  
  static_assert(sizeof(half) == sizeof(ggml_fp16_t), "wrong fp16 size");
  
-@@ -749,8 +750,111 @@ static void ggml_backend_cuda_buffer_set_tensor(ggml_backend_buffer_t buffer, gg
+@@ -100,11 +101,12 @@ void ggml_cuda_set_device(int device) {
+     int current_device;
+     CUDA_CHECK(cudaGetDevice(&current_device));
+ 
+-    if (device == current_device) {
+-        return;
++    if (device != current_device) {
++        CUDA_CHECK(cudaSetDevice(device));
+     }
+ 
+-    CUDA_CHECK(cudaSetDevice(device));
++    // Force context creation/attachment on THIS thread even if device is unchanged.
++    CUDA_CHECK(cudaFree(0));
+ }
+ 
+ int ggml_cuda_get_device() {
+@@ -749,6 +751,108 @@ static void ggml_backend_cuda_buffer_set_tensor(ggml_backend_buffer_t buffer, gg
      ggml_backend_cuda_buffer_context * ctx = (ggml_backend_cuda_buffer_context *)buffer->context;
  
      ggml_cuda_set_device(ctx->device);
--    CUDA_CHECK(cudaMemcpyAsync((char *)tensor->data + offset, data, size, cudaMemcpyHostToDevice, cudaStreamPerThread));
--    CUDA_CHECK(cudaStreamSynchronize(cudaStreamPerThread));
 +
 +    // ---- DIAG ----
 +    {
@@ -115,12 +129,9 @@ index 5c9dfd03..3429a1c3 100644
 +        }
 +    }
 +    // ---- END DIAG ----
++    // test non-async
++    //CUDA_CHECK(cudaMemcpy((char *)tensor->data + offset, data, size, cudaMemcpyHostToDevice));
 +
-+    CUDA_CHECK(cudaMemcpy((char *)tensor->data + offset, data, size, cudaMemcpyHostToDevice));
-+
-+
-+//    CUDA_CHECK(cudaMemcpyAsync((char *)tensor->data + offset, data, size, cudaMemcpyHostToDevice, cudaStreamPerThread));
-+//    CUDA_CHECK(cudaStreamSynchronize(cudaStreamPerThread));
+     CUDA_CHECK(cudaMemcpyAsync((char *)tensor->data + offset, data, size, cudaMemcpyHostToDevice, cudaStreamPerThread));
+     CUDA_CHECK(cudaStreamSynchronize(cudaStreamPerThread));
  }
- 
- static void ggml_backend_cuda_buffer_get_tensor(ggml_backend_buffer_t buffer, const ggml_tensor * tensor, void * data, size_t offset, size_t size) {
