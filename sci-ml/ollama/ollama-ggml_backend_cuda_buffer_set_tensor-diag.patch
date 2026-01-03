@@ -1,21 +1,13 @@
 diff --git a/ml/backend/ggml/ggml/src/ggml-cuda/ggml-cuda.cu b/ml/backend/ggml/ggml/src/ggml-cuda/ggml-cuda.cu
-index 5c9dfd03..c429e54a 100644
+index 5c9dfd03..b364b4e9 100644
 --- a/ml/backend/ggml/ggml/src/ggml-cuda/ggml-cuda.cu
 +++ b/ml/backend/ggml/ggml/src/ggml-cuda/ggml-cuda.cu
-@@ -79,6 +79,7 @@
- #include <stdlib.h>
- #include <string>
- #include <vector>
-+#include <cuda.h>
- 
- static_assert(sizeof(half) == sizeof(ggml_fp16_t), "wrong fp16 size");
- 
-@@ -97,14 +98,27 @@ void ggml_cuda_error(const char * stmt, const char * func, const char * file, in
+@@ -97,14 +97,19 @@ void ggml_cuda_error(const char * stmt, const char * func, const char * file, in
  // this is faster on Windows
  // probably because the Windows CUDA libraries forget to make this check before invoking the drivers
  void ggml_cuda_set_device(int device) {
 -    int current_device;
-+    thread_local unsigned long long tls_inited_mask = 0ULL;
++    thread_local int tls_inited_device = -1;
 +
 +    int current_device = -1;
      CUDA_CHECK(cudaGetDevice(&current_device));
@@ -24,25 +16,17 @@ index 5c9dfd03..c429e54a 100644
 -        return;
 +    if (device != current_device) {
 +        CUDA_CHECK(cudaSetDevice(device));
-+    }
-+
-+    const unsigned long long bit = 1ULL << device;
-+    if ((tls_inited_mask & bit) == 0) {
-+        CUDA_CHECK(cudaFree(0));
-+        tls_inited_mask |= bit;
      }
  
 -    CUDA_CHECK(cudaSetDevice(device));
-+    // Diag
-+    if ((tls_inited_mask & bit) == 0) {
-+    	fprintf(stderr, "[CUDA] init thread=%ld device=%d\n", (long)syscall(SYS_gettid), device);
-+    	CUDA_CHECK(cudaFree(0));
-+    	tls_inited_mask |= bit;
++    if (tls_inited_device != device) {
++        CUDA_CHECK(cudaFree(0));
++        tls_inited_device = device;
 +    }
  }
  
  int ggml_cuda_get_device() {
-@@ -115,7 +129,7 @@ int ggml_cuda_get_device() {
+@@ -115,7 +120,7 @@ int ggml_cuda_get_device() {
  
  void ggml_cuda_reset_device(int device) {
      ggml_cuda_set_device(device);
@@ -51,112 +35,3 @@ index 5c9dfd03..c429e54a 100644
  }
  
  static cudaError_t ggml_cuda_device_malloc(void ** ptr, size_t size, int device) {
-@@ -749,6 +763,108 @@ static void ggml_backend_cuda_buffer_set_tensor(ggml_backend_buffer_t buffer, gg
-     ggml_backend_cuda_buffer_context * ctx = (ggml_backend_cuda_buffer_context *)buffer->context;
- 
-     ggml_cuda_set_device(ctx->device);
-+
-+    // ---- DIAG ----
-+    {
-+        CUcontext c = NULL;
-+        CUresult cr = cuCtxGetCurrent(&c);
-+        if (cr != CUDA_SUCCESS || c == NULL) {
-+            const char *en = "unknown";
-+            const char *es = "unknown";
-+            cuGetErrorName(cr, &en);
-+            cuGetErrorString(cr, &es);
-+            fprintf(stderr, "[GGML-CUDA-DIAG] cuCtxGetCurrent BAD cr=%d %s %s ctx=%p\n",
-+                    (int)cr, en, es, (void*)c);
-+        }
-+    }
-+
-+    {
-+        int cur_dev = -1;
-+        cudaGetDevice(&cur_dev);
-+
-+        void *dst0 = (void *) tensor->data;
-+        void *dst1 = (void *) ((char *) tensor->data + offset);
-+
-+        cudaPointerAttributes a0;
-+        cudaPointerAttributes a1;
-+        memset(&a0, 0, sizeof(a0));
-+        memset(&a1, 0, sizeof(a1));
-+
-+        cudaError_t e0 = cudaPointerGetAttributes(&a0, dst0);
-+        cudaError_t e1 = cudaPointerGetAttributes(&a1, dst1);
-+
-+        // On modern CUDA, a.type exists. If your headers complain, switch to a.memoryType.
-+        int t0 = -1;
-+        int t1 = -1;
-+#if defined(CUDART_VERSION) && (CUDART_VERSION >= 10000)
-+        t0 = (int) a0.type;
-+        t1 = (int) a1.type;
-+#else
-+        t0 = (int) a0.memoryType;
-+        t1 = (int) a1.memoryType;
-+#endif
-+
-+        fprintf(stderr,
-+            "[GGML-CUDA-DIAG] dev(ctx)=%d dev(cur)=%d tensor=%p buffer=%p "
-+            "data(host)=%p dst0=%p dst1=%p off=%zu size=%zu "
-+            "attr0=%d(%s) type0=%d attr1=%d(%s) type1=%d\n",
-+            ctx->device, cur_dev,
-+            (void *) tensor, (void *) buffer,
-+            data, dst0, dst1, (size_t) offset, (size_t) size,
-+            (int) e0, cudaGetErrorString(e0), t0,
-+            (int) e1, cudaGetErrorString(e1), t1
-+        );
-+
-+        // Catch any earlier latent error before we do the memcpy.
-+        cudaError_t elast = cudaGetLastError();
-+        if (elast != cudaSuccess) {
-+            fprintf(stderr, "[GGML-CUDA-DIAG] prior cudaGetLastError=%d(%s)\n",
-+                (int) elast, cudaGetErrorString(elast));
-+        }
-+    }
-+    // ---- END DIAG ----
-+
-+    // ---- DIAG: allocation bounds for dst1 ----
-+    {
-+        CUdeviceptr p = (CUdeviceptr) ((char *) tensor->data + offset);
-+        CUdeviceptr base = 0;
-+        size_t alloc_len = 0;
-+
-+        CUresult cr = cuMemGetAddressRange(&base, &alloc_len, p);
-+        if (cr != CUDA_SUCCESS) {
-+            const char *errname = "unknown";
-+            const char *errstr  = "unknown";
-+            cuGetErrorName(cr, &errname);
-+            cuGetErrorString(cr, &errstr);
-+            fprintf(stderr,
-+                "[GGML-CUDA-DIAG] cuMemGetAddressRange FAILED cr=%d %s %s p=%p\n",
-+                (int) cr, errname, errstr, (void *) p
-+            );
-+        } else {
-+            size_t p_off = (size_t) (p - base);
-+            size_t end_off = p_off + (size_t) size;
-+
-+            fprintf(stderr,
-+                "[GGML-CUDA-DIAG] alloc base=%p len=%zu p=%p p_off=%zu size=%zu end_off=%zu OOB=%d\n",
-+                (void *) base, alloc_len, (void *) p,
-+                p_off, (size_t) size, end_off,
-+                (end_off > alloc_len) ? 1 : 0
-+            );
-+        }
-+
-+        // Also flush any prior CUDA runtime error right before memcpy
-+        cudaError_t elast = cudaGetLastError();
-+        if (elast != cudaSuccess) {
-+            fprintf(stderr,
-+                "[GGML-CUDA-DIAG] prior cudaGetLastError=%d(%s)\n",
-+                (int) elast, cudaGetErrorString(elast)
-+            );
-+        }
-+    }
-+    // ---- END DIAG ----
-+    // test non-async
-+    //CUDA_CHECK(cudaMemcpy((char *)tensor->data + offset, data, size, cudaMemcpyHostToDevice));
-+
-     CUDA_CHECK(cudaMemcpyAsync((char *)tensor->data + offset, data, size, cudaMemcpyHostToDevice, cudaStreamPerThread));
-     CUDA_CHECK(cudaStreamSynchronize(cudaStreamPerThread));
- }
