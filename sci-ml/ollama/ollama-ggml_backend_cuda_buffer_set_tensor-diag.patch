@@ -1,5 +1,5 @@
 diff --git a/ml/backend/ggml/ggml/src/ggml-cuda/ggml-cuda.cu b/ml/backend/ggml/ggml/src/ggml-cuda/ggml-cuda.cu
-index 5c9dfd03..96247b95 100644
+index 5c9dfd03..c429e54a 100644
 --- a/ml/backend/ggml/ggml/src/ggml-cuda/ggml-cuda.cu
 +++ b/ml/backend/ggml/ggml/src/ggml-cuda/ggml-cuda.cu
 @@ -79,6 +79,7 @@
@@ -10,7 +10,7 @@ index 5c9dfd03..96247b95 100644
  
  static_assert(sizeof(half) == sizeof(ggml_fp16_t), "wrong fp16 size");
  
-@@ -97,14 +98,20 @@ void ggml_cuda_error(const char * stmt, const char * func, const char * file, in
+@@ -97,14 +98,27 @@ void ggml_cuda_error(const char * stmt, const char * func, const char * file, in
  // this is faster on Windows
  // probably because the Windows CUDA libraries forget to make this check before invoking the drivers
  void ggml_cuda_set_device(int device) {
@@ -24,18 +24,34 @@ index 5c9dfd03..96247b95 100644
 -        return;
 +    if (device != current_device) {
 +        CUDA_CHECK(cudaSetDevice(device));
-     }
- 
--    CUDA_CHECK(cudaSetDevice(device));
++    }
++
 +    const unsigned long long bit = 1ULL << device;
 +    if ((tls_inited_mask & bit) == 0) {
 +        CUDA_CHECK(cudaFree(0));
 +        tls_inited_mask |= bit;
+     }
+ 
+-    CUDA_CHECK(cudaSetDevice(device));
++    // Diag
++    if ((tls_inited_mask & bit) == 0) {
++    	fprintf(stderr, "[CUDA] init thread=%ld device=%d\n", (long)syscall(SYS_gettid), device);
++    	CUDA_CHECK(cudaFree(0));
++    	tls_inited_mask |= bit;
 +    }
  }
  
  int ggml_cuda_get_device() {
-@@ -749,6 +756,108 @@ static void ggml_backend_cuda_buffer_set_tensor(ggml_backend_buffer_t buffer, gg
+@@ -115,7 +129,7 @@ int ggml_cuda_get_device() {
+ 
+ void ggml_cuda_reset_device(int device) {
+     ggml_cuda_set_device(device);
+-    CUDA_CHECK(cudaDeviceReset());
++    // CUDA_CHECK(cudaDeviceReset());
+ }
+ 
+ static cudaError_t ggml_cuda_device_malloc(void ** ptr, size_t size, int device) {
+@@ -749,6 +763,108 @@ static void ggml_backend_cuda_buffer_set_tensor(ggml_backend_buffer_t buffer, gg
      ggml_backend_cuda_buffer_context * ctx = (ggml_backend_cuda_buffer_context *)buffer->context;
  
      ggml_cuda_set_device(ctx->device);
