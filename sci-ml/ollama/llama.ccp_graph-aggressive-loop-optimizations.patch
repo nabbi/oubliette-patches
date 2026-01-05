@@ -50,7 +50,7 @@ index 386fab04..8facd21e 100644
          }
          free(batch.seq_id);
 diff --git a/llama/llama.cpp/src/llama-graph.cpp b/src/llama-graph.cpp
-index 1d0d7197..6dd38e4a 100644
+index 1d0d7197..c5ebbd7c 100644
 --- a/llama/llama.cpp/src/llama-graph.cpp
 +++ b/llama/llama.cpp/src/llama-graph.cpp
 @@ -46,7 +46,7 @@ void llm_graph_input_pos::set_input(const llama_ubatch * ubatch) {
@@ -166,24 +166,6 @@ index 1d0d7197..6dd38e4a 100644
              data[i] = mctx->s_copy(i);
          }
      }
-@@ -298,14 +298,14 @@ static void print_mask(const float * data, int64_t n_tokens, int64_t n_kv, int64
-     LLAMA_LOG_DEBUG("%s: Rows = query tokens, Columns = key/value tokens\n\n", __func__);
- 
-     LLAMA_LOG_DEBUG("    ");
--    for (int j = 0; j < std::min((int64_t)20, n_kv); ++j) {
-+    for (int64_t j = 0; j < std::min((int64_t)20, n_kv); ++j) {
-         LLAMA_LOG_DEBUG("%2d", j);
-     }
-     LLAMA_LOG_DEBUG("\n");
- 
--    for (int i = 0; i < std::min((int64_t)20, n_tokens); ++i) {
-+    for (int64_t i = 0; i < std::min((int64_t)20, n_tokens); ++i) {
-         LLAMA_LOG_DEBUG(" %2d ", i);
--        for (int j = 0; j < std::min((int64_t)20, n_kv); ++j) {
-+        for (int64_t j = 0; j < std::min((int64_t)20, n_kv); ++j) {
-             float val = data[i * n_kv + j];
-             if (val == -INFINITY) {
-                 LLAMA_LOG_DEBUG(" ∞");
 @@ -323,13 +323,13 @@ void llm_graph_input_attn_no_cache::set_input(const llama_ubatch * ubatch) {
  
      const auto fill_mask = [&](float * data, int n_swa, llama_swa_type swa_type) {
