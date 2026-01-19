@@ -1,0 +1,113 @@
+diff --git a/src/main.c b/src/main.c
+index 3cb09fd..f9ac471 100644
+--- a/src/main.c
++++ b/src/main.c
+@@ -182,35 +182,98 @@ static int lockDisplay(Display *display, struct aModules *modules) {
+     Cursor cursor;
+     int i;
+ 
++    Window bgwins[32];
++    int bgcount = 0;
++
++    /* Raise/map background windows and remember them */
+     for (i = 0; i < ScreenCount(display); i++) {
+ 
+-        /* raise background window */
+-        if ((window = modules->background->getwindow(i)) != None) {
++        Window bg = modules->background->getwindow(i);
++        if (bg != None) {
+ 
+-            Window window_input;
++            Window window_input = modules->input->getwindow(i);
++            if (window_input != None)
++                XReparentWindow(display, window_input, bg, 0, 0);
+ 
+-            if ((window_input = modules->input->getwindow(i)) != None)
+-                XReparentWindow(display, window_input, window, 0, 0);
++            /* Listen for map/visibility/expose so we can wait for paint */
++            XSelectInput(display, bg, ExposureMask | StructureNotifyMask | VisibilityChangeMask);
+ 
+-            XMapWindow(display, window);
+-            XRaiseWindow(display, window);
++            XMapWindow(display, bg);
++            XRaiseWindow(display, bg);
+ 
++            if (bgcount < (int)(sizeof(bgwins) / sizeof(bgwins[0])))
++                bgwins[bgcount++] = bg;
+         }
+ 
+         /* receive notification about root window geometry change */
+         XSelectInput(display, RootWindow(display, i), StructureNotifyMask);
+     }
+ 
++    /*
++     * Ensure requests are processed, then wait briefly for the background
++     * windows to become viewable and to receive at least one paint-related event.
++     *
++     * This avoids ARGB cursor transparency revealing stale "saved-under" pixels
++     * from the pre-lock desktop.
++     */
++    XSync(display, False);
++
++    {
++        unsigned long start = alock_mtime();
++        int painted = 0;
++
++        /* Wait up to 500ms total (tune as needed) */
++        while (alock_mtime() - start < 500) {
++
++            XEvent ev;
++
++            /* Pump events; do not block hard forever */
++            while (XCheckMaskEvent(display,
++                        ExposureMask | StructureNotifyMask | VisibilityChangeMask,
++                        &ev)) {
++
++                if (ev.type == Expose) {
++                    painted = 1;
++                }
++                else if (ev.type == MapNotify) {
++                    /* map happened, not necessarily painted */
++                }
++                else if (ev.type == VisibilityNotify) {
++                    if (((XVisibilityEvent *)&ev)->state == VisibilityUnobscured)
++                        painted = 1;
++                }
++            }
++
++            if (painted)
++                break;
++
++            /* Give the server a moment */
++            usleep(10000);
++        }
++
++        /* Final sync before cursor/grab */
++        XSync(display, False);
++    }
++
+     /* grab pointer and keyboard from the default screen */
+     window = DefaultRootWindow(display);
+-    cursor = modules->cursor->getcursor();
+ 
+-    if (XGrabPointer(display, window, False, None, GrabModeAsync, GrabModeAsync, None,
+-                cursor, CurrentTime) != GrabSuccess) {
++    /*
++     * Grab pointer first without a custom cursor, then switch to the real cursor.
++     * This reduces "save-under" capturing pre-lock pixels on some servers/drivers.
++     */
++    if (XGrabPointer(display, window, False, 0,
++                GrabModeAsync, GrabModeAsync, None,
++                None, CurrentTime) != GrabSuccess) {
+         fprintf(stderr, "error: grab pointer failed\n");
+         return -1;
+     }
+ 
++    XSync(display, False);
++
++    cursor = modules->cursor->getcursor();
++    XChangeActivePointerGrab(display, 0, cursor, CurrentTime);
++
+     /* try to grab 2 times, another process (windowmanager) may have grabbed
+      * the keyboard already */
+     if (XGrabKeyboard(display, window, True, GrabModeAsync, GrabModeAsync,
