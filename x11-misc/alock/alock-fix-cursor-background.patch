@@ -1,39 +1,45 @@
 diff --git a/src/main.c b/src/main.c
-index 3cb09fd..f9ac471 100644
+index 3cb09fd..4558e81 100644
 --- a/src/main.c
 +++ b/src/main.c
-@@ -182,35 +182,98 @@ static int lockDisplay(Display *display, struct aModules *modules) {
+@@ -182,35 +182,122 @@ static int lockDisplay(Display *display, struct aModules *modules) {
      Cursor cursor;
      int i;
  
-+    Window bgwins[32];
+-    for (i = 0; i < ScreenCount(display); i++) {
++    int nscreens = ScreenCount(display);
++    Window *bgwins = calloc((size_t)nscreens, sizeof(*bgwins));
 +    int bgcount = 0;
-+
-+    /* Raise/map background windows and remember them */
-     for (i = 0; i < ScreenCount(display); i++) {
  
 -        /* raise background window */
 -        if ((window = modules->background->getwindow(i)) != None) {
++    if (bgwins == NULL) {
++        fprintf(stderr, "error: out of memory\n");
++        return -1;
++    }
++
++    /* Raise/map background windows and remember them */
++    for (i = 0; i < nscreens; i++) {
+ 
+-            Window window_input;
 +        Window bg = modules->background->getwindow(i);
 +        if (bg != None) {
  
--            Window window_input;
+-            if ((window_input = modules->input->getwindow(i)) != None)
+-                XReparentWindow(display, window_input, window, 0, 0);
 +            Window window_input = modules->input->getwindow(i);
 +            if (window_input != None)
 +                XReparentWindow(display, window_input, bg, 0, 0);
  
--            if ((window_input = modules->input->getwindow(i)) != None)
--                XReparentWindow(display, window_input, window, 0, 0);
-+            /* Listen for map/visibility/expose so we can wait for paint */
-+            XSelectInput(display, bg, ExposureMask | StructureNotifyMask | VisibilityChangeMask);
- 
 -            XMapWindow(display, window);
 -            XRaiseWindow(display, window);
++            /* Listen for paint-related events from the background window */
++            XSelectInput(display, bg, ExposureMask | StructureNotifyMask | VisibilityChangeMask);
+ 
 +            XMapWindow(display, bg);
 +            XRaiseWindow(display, bg);
- 
-+            if (bgcount < (int)(sizeof(bgwins) / sizeof(bgwins[0])))
-+                bgwins[bgcount++] = bg;
++
++            bgwins[bgcount++] = bg;
          }
  
          /* receive notification about root window geometry change */
@@ -41,19 +47,20 @@ index 3cb09fd..f9ac471 100644
      }
  
 +    /*
-+     * Ensure requests are processed, then wait briefly for the background
-+     * windows to become viewable and to receive at least one paint-related event.
-+     *
-+     * This avoids ARGB cursor transparency revealing stale "saved-under" pixels
-+     * from the pre-lock desktop.
++     * Ensure requests are processed, then wait briefly for at least one
++     * background window to become viewable / paint.
 +     */
 +    XSync(display, False);
 +
-+    {
++    if (bgcount > 0) {
++
 +        unsigned long start = alock_mtime();
 +        int painted = 0;
 +
-+        /* Wait up to 500ms total (tune as needed) */
++        /*
++         * Upper bound to avoid blocking forever; X11 gives no guarantee that
++         * expose or visibility events will ever arrive.
++         */
 +        while (alock_mtime() - start < 500) {
 +
 +            XEvent ev;
@@ -63,28 +70,46 @@ index 3cb09fd..f9ac471 100644
 +                        ExposureMask | StructureNotifyMask | VisibilityChangeMask,
 +                        &ev)) {
 +
-+                if (ev.type == Expose) {
-+                    painted = 1;
-+                }
-+                else if (ev.type == MapNotify) {
-+                    /* map happened, not necessarily painted */
-+                }
-+                else if (ev.type == VisibilityNotify) {
-+                    if (((XVisibilityEvent *)&ev)->state == VisibilityUnobscured)
++                /* Only accept events from one of our background windows */
++                Window src = None;
++                if (ev.type == Expose)
++                    src = ev.xexpose.window;
++                else if (ev.type == VisibilityNotify)
++                    src = ev.xvisibility.window;
++                else
++                    continue;
++
++                /*
++                * Only treat paint-related events from our own background windows as
++                * meaningful; X11 may deliver expose/visibility events for unrelated
++                * windows (e.g. root or WM-managed windows).
++                */
++                int j;
++                for (j = 0; j < bgcount; j++)
++                    if (bgwins[j] == src) {
 +                        painted = 1;
-+                }
++                        break;
++                    }
++
++                if (painted)
++                    break;
 +            }
 +
 +            if (painted)
 +                break;
 +
-+            /* Give the server a moment */
++            /*
++             * Yield briefly to let the server/compositor make progress without
++             * busy-spinning while waiting for paint-related events.
++             */
 +            usleep(10000);
 +        }
 +
 +        /* Final sync before cursor/grab */
 +        XSync(display, False);
 +    }
++
++    free(bgwins);
 +
      /* grab pointer and keyboard from the default screen */
      window = DefaultRootWindow(display);
