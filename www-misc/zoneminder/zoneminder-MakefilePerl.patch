@@ -29,7 +29,7 @@ index c0406dd94..cf0817810 100644
  scripts/ZoneMinder/cmake_install.cmake
  scripts/ZoneMinder/lib/ZoneMinder/Base.pm
 diff --git a/onvif/modules/CMakeLists.txt b/onvif/modules/CMakeLists.txt
-index 502970af9..13cb55b4a 100644
+index 502970af9..d0a1f2149 100644
 --- a/onvif/modules/CMakeLists.txt
 +++ b/onvif/modules/CMakeLists.txt
 @@ -1,18 +1,36 @@
@@ -47,7 +47,7 @@ index 502970af9..13cb55b4a 100644
 -add_custom_target(zmonvifmodules ALL perl Makefile.PL ${ZM_PERL_MM_PARMS_FULL} FIRST_MAKEFILE=MakefilePerl DESTDIR="${CMAKE_CURRENT_BINARY_DIR}/output" ${MAKEMAKER_NOECHO_COMMAND} COMMAND make -f MakefilePerl pure_install COMMENT "Building ZoneMinder perl ONVIF proxy module")
 +# Add build target for the perl modules (isolated MakeMaker build dir)
 +set(ZM_PERLMM_DIR "${CMAKE_CURRENT_BINARY_DIR}/perlmm")
-+set(ZM_PERL_OUTDIR "${CMAKE_CURRENT_BINARY_DIR}/output")
++set(ZM_PERL_OUTDIR "${ZM_PERLMM_DIR}/output")
 +
 +add_custom_target(zmonvifmodules ALL
 +  COMMAND "${CMAKE_COMMAND}" -E make_directory "${ZM_PERLMM_DIR}"
@@ -69,18 +69,18 @@ index 502970af9..13cb55b4a 100644
 +  COMMAND "${CMAKE_COMMAND}" -E chdir "${ZM_PERLMM_DIR}"
 +          make DESTDIR="${ZM_PERL_OUTDIR}" pure_install
 +
-+
 +  COMMENT "Building ZoneMinder perl ONVIF modules"
 +)
  
  # Add install target for the perl modules
- install(DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/output/" DESTINATION "/")
+-install(DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/output/" DESTINATION "/")
++install(DIRECTORY "${ZM_PERL_OUTDIR}/" DESTINATION "/")
  
--# Add additional files and directories to make clean
+ # Add additional files and directories to make clean
 -set_directory_properties(PROPERTIES ADDITIONAL_MAKE_CLEAN_FILES "output;blib;pm_to_blib;MakefilePerl")
 +set_directory_properties(PROPERTIES ADDITIONAL_MAKE_CLEAN_FILES "output;perlmm")
 diff --git a/onvif/proxy/CMakeLists.txt b/onvif/proxy/CMakeLists.txt
-index 779b4d47e..d92994323 100644
+index 779b4d47e..7e452c5bf 100644
 --- a/onvif/proxy/CMakeLists.txt
 +++ b/onvif/proxy/CMakeLists.txt
 @@ -1,18 +1,36 @@
@@ -98,7 +98,7 @@ index 779b4d47e..d92994323 100644
 -add_custom_target(zmonvifproxy ALL perl Makefile.PL ${ZM_PERL_MM_PARMS_FULL} FIRST_MAKEFILE=MakefilePerl DESTDIR=${CMAKE_CURRENT_BINARY_DIR}/output ${MAKEMAKER_NOECHO_COMMAND} COMMAND make -f MakefilePerl pure_install COMMENT "Building ZoneMinder perl ONVIF proxy module")
 +# Add build target for the perl modules (isolated MakeMaker build dir)
 +set(ZM_PERLMM_DIR "${CMAKE_CURRENT_BINARY_DIR}/perlmm")
-+set(ZM_PERL_OUTDIR "${CMAKE_CURRENT_BINARY_DIR}/output")
++set(ZM_PERL_OUTDIR "${ZM_PERLMM_DIR}/output")
 +
 +add_custom_target(zmonvifproxy ALL
 +  COMMAND "${CMAKE_COMMAND}" -E make_directory "${ZM_PERLMM_DIR}"
@@ -124,13 +124,14 @@ index 779b4d47e..d92994323 100644
 +)
  
  # Add install target for the perl modules
- install(DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/output/" DESTINATION "/")
+-install(DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/output/" DESTINATION "/")
++install(DIRECTORY "${ZM_PERL_OUTDIR}/" DESTINATION "/")
  
  # Add additional files and directories to make clean
 -set_directory_properties(PROPERTIES ADDITIONAL_MAKE_CLEAN_FILES "output;blib;pm_to_blib;MakefilePerl")
 +set_directory_properties(PROPERTIES ADDITIONAL_MAKE_CLEAN_FILES "output;perlmm")
 diff --git a/scripts/ZoneMinder/CMakeLists.txt b/scripts/ZoneMinder/CMakeLists.txt
-index 2a8708d2f..167e1bf81 100644
+index 2a8708d2f..322fd4759 100644
 --- a/scripts/ZoneMinder/CMakeLists.txt
 +++ b/scripts/ZoneMinder/CMakeLists.txt
 @@ -12,6 +12,7 @@ if(NOT (CMAKE_BINARY_DIR STREQUAL CMAKE_SOURCE_DIR))
@@ -149,7 +150,7 @@ index 2a8708d2f..167e1bf81 100644
 -add_custom_target(zmperlmodules ALL perl Makefile.PL ${ZM_PERL_MM_PARMS_FULL} FIRST_MAKEFILE=MakefilePerl DESTDIR="${CMAKE_CURRENT_BINARY_DIR}/output" ${MAKEMAKER_NOECHO_COMMAND} COMMAND make -f MakefilePerl pure_install COMMENT "Building ZoneMinder perl modules")
 +# Add build target for the perl modules (isolated MakeMaker build dir)
 +set(ZM_PERLMM_DIR "${CMAKE_CURRENT_BINARY_DIR}/perlmm")
-+set(ZM_PERL_OUTDIR "${CMAKE_CURRENT_BINARY_DIR}/output")
++set(ZM_PERL_OUTDIR "${ZM_PERLMM_DIR}/output")
 +
 +add_custom_target(zmperlmodules ALL
 +  COMMAND "${CMAKE_COMMAND}" -E make_directory "${ZM_PERLMM_DIR}"
@@ -177,7 +178,8 @@ index 2a8708d2f..167e1bf81 100644
 +
  
  # Add install target for the perl modules
- install(DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/output/" DESTINATION "/")
+-install(DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/output/" DESTINATION "/")
++install(DIRECTORY "${ZM_PERL_OUTDIR}/" DESTINATION "/")
  
  # Add additional files and directories to make clean
 -set_directory_properties(PROPERTIES ADDITIONAL_MAKE_CLEAN_FILES "output;blib;pm_to_blib;MakefilePerl")
