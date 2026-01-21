@@ -29,7 +29,7 @@ index c0406dd94..cf0817810 100644
  scripts/ZoneMinder/cmake_install.cmake
  scripts/ZoneMinder/lib/ZoneMinder/Base.pm
 diff --git a/onvif/modules/CMakeLists.txt b/onvif/modules/CMakeLists.txt
-index 502970af9..43bbc17ec 100644
+index 502970af9..d93e6b3d1 100644
 --- a/onvif/modules/CMakeLists.txt
 +++ b/onvif/modules/CMakeLists.txt
 @@ -1,18 +1,34 @@
@@ -49,7 +49,7 @@ index 502970af9..43bbc17ec 100644
 +set(ZM_PERLMM_DIR "${CMAKE_CURRENT_BINARY_DIR}/perlmm")
 +set(ZM_PERL_OUTDIR "${CMAKE_CURRENT_BINARY_DIR}/output")
 +
-+add_custom_target(zmonvifmodules ALL
++add_custom_target(zmonvifproxy ALL
 +  COMMAND "${CMAKE_COMMAND}" -E make_directory "${ZM_PERLMM_DIR}"
 +  COMMAND "${CMAKE_COMMAND}" -E make_directory "${ZM_PERL_OUTDIR}"
 +
