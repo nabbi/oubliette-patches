@@ -29,7 +29,7 @@ index c0406dd94..cf0817810 100644
  scripts/ZoneMinder/cmake_install.cmake
  scripts/ZoneMinder/lib/ZoneMinder/Base.pm
 diff --git a/onvif/modules/CMakeLists.txt b/onvif/modules/CMakeLists.txt
-index 502970af9..90e4fe849 100644
+index 502970af9..13cb55b4a 100644
 --- a/onvif/modules/CMakeLists.txt
 +++ b/onvif/modules/CMakeLists.txt
 @@ -1,18 +1,36 @@
@@ -64,11 +64,11 @@ index 502970af9..90e4fe849 100644
 +  COMMAND "${CMAKE_COMMAND}" -E chdir "${ZM_PERLMM_DIR}"
 +          perl Makefile.PL
 +          ${ZM_PERL_MM_PARMS_FULL}
-+          DESTDIR="${ZM_PERL_OUTDIR}"
 +          ${MAKEMAKER_NOECHO_COMMAND}
 +
 +  COMMAND "${CMAKE_COMMAND}" -E chdir "${ZM_PERLMM_DIR}"
-+          make pure_install
++          make DESTDIR="${ZM_PERL_OUTDIR}" pure_install
++
 +
 +  COMMENT "Building ZoneMinder perl ONVIF modules"
 +)
@@ -80,10 +80,10 @@ index 502970af9..90e4fe849 100644
 -set_directory_properties(PROPERTIES ADDITIONAL_MAKE_CLEAN_FILES "output;blib;pm_to_blib;MakefilePerl")
 +set_directory_properties(PROPERTIES ADDITIONAL_MAKE_CLEAN_FILES "output;perlmm")
 diff --git a/onvif/proxy/CMakeLists.txt b/onvif/proxy/CMakeLists.txt
-index 779b4d47e..77c3735f5 100644
+index 779b4d47e..d92994323 100644
 --- a/onvif/proxy/CMakeLists.txt
 +++ b/onvif/proxy/CMakeLists.txt
-@@ -1,18 +1,37 @@
+@@ -1,18 +1,36 @@
  # CMakeLists.txt for the ZoneMinder ONVIF proxy module.
  
 -# If this is an out-of-source build, copy the files we need to the binary directory
@@ -115,11 +115,10 @@ index 779b4d47e..77c3735f5 100644
 +  COMMAND "${CMAKE_COMMAND}" -E chdir "${ZM_PERLMM_DIR}"
 +          perl Makefile.PL
 +          ${ZM_PERL_MM_PARMS_FULL}
-+          DESTDIR="${ZM_PERL_OUTDIR}"
 +          ${MAKEMAKER_NOECHO_COMMAND}
 +
 +  COMMAND "${CMAKE_COMMAND}" -E chdir "${ZM_PERLMM_DIR}"
-+          make pure_install
++          make DESTDIR="${ZM_PERL_OUTDIR}" pure_install
 +
 +  COMMENT "Building ZoneMinder perl ONVIF proxy module"
 +)
@@ -131,7 +130,7 @@ index 779b4d47e..77c3735f5 100644
 -set_directory_properties(PROPERTIES ADDITIONAL_MAKE_CLEAN_FILES "output;blib;pm_to_blib;MakefilePerl")
 +set_directory_properties(PROPERTIES ADDITIONAL_MAKE_CLEAN_FILES "output;perlmm")
 diff --git a/scripts/ZoneMinder/CMakeLists.txt b/scripts/ZoneMinder/CMakeLists.txt
-index 2a8708d2f..d08b16b48 100644
+index 2a8708d2f..167e1bf81 100644
 --- a/scripts/ZoneMinder/CMakeLists.txt
 +++ b/scripts/ZoneMinder/CMakeLists.txt
 @@ -12,6 +12,7 @@ if(NOT (CMAKE_BINARY_DIR STREQUAL CMAKE_SOURCE_DIR))
@@ -142,7 +141,7 @@ index 2a8708d2f..d08b16b48 100644
  configure_file(lib/ZoneMinder/Base.pm.in "${CMAKE_CURRENT_BINARY_DIR}/lib/ZoneMinder/Base.pm" @ONLY)
  configure_file(lib/ZoneMinder/Config.pm.in "${CMAKE_CURRENT_BINARY_DIR}/lib/ZoneMinder/Config.pm" @ONLY)
  configure_file(lib/ZoneMinder/Memory.pm.in "${CMAKE_CURRENT_BINARY_DIR}/lib/ZoneMinder/Memory.pm" @ONLY)
-@@ -24,11 +25,38 @@ else()
+@@ -24,11 +25,37 @@ else()
    set(MAKEMAKER_NOECHO_COMMAND "NOECHO=\"1>/dev/null\"")
  endif()
  
@@ -168,11 +167,10 @@ index 2a8708d2f..d08b16b48 100644
 +  COMMAND "${CMAKE_COMMAND}" -E chdir "${ZM_PERLMM_DIR}"
 +          perl Makefile.PL
 +          ${ZM_PERL_MM_PARMS_FULL}
-+          DESTDIR="${ZM_PERL_OUTDIR}"
 +          ${MAKEMAKER_NOECHO_COMMAND}
 +
 +  COMMAND "${CMAKE_COMMAND}" -E chdir "${ZM_PERLMM_DIR}"
-+          make pure_install
++          make DESTDIR="${ZM_PERL_OUTDIR}" pure_install
 +
 +  COMMENT "Building ZoneMinder perl modules"
 +)
