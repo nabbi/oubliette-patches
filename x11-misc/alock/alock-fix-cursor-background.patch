@@ -1,44 +1,55 @@
 diff --git a/src/main.c b/src/main.c
-index 3cb09fd..4558e81 100644
+index 3cb09fd..5cb5113 100644
 --- a/src/main.c
 +++ b/src/main.c
-@@ -182,35 +182,122 @@ static int lockDisplay(Display *display, struct aModules *modules) {
+@@ -16,6 +16,7 @@
+ #include <locale.h>
+ #include <signal.h>
+ #include <spawn.h>
++#include <stdbool.h>
+ #include <stdlib.h>
+ #include <string.h>
+ #include <unistd.h>
+@@ -180,37 +181,127 @@ static int lockDisplay(Display *display, struct aModules *modules) {
+ 
+     Window window;
      Cursor cursor;
-     int i;
+-    int i;
  
 -    for (i = 0; i < ScreenCount(display); i++) {
 +    int nscreens = ScreenCount(display);
-+    Window *bgwins = calloc((size_t)nscreens, sizeof(*bgwins));
-+    int bgcount = 0;
++    Window *bgwins = calloc(nscreens, sizeof(*bgwins));
  
 -        /* raise background window */
 -        if ((window = modules->background->getwindow(i)) != None) {
++    int bgcount = 0;
+ 
+-            Window window_input;
 +    if (bgwins == NULL) {
-+        fprintf(stderr, "error: out of memory\n");
++        fprintf(stderr, "alock: error window out of memory\n");
 +        return -1;
 +    }
 +
 +    /* Raise/map background windows and remember them */
-+    for (i = 0; i < nscreens; i++) {
- 
--            Window window_input;
++    for (int i = 0; i < nscreens; i++) {
++
 +        Window bg = modules->background->getwindow(i);
 +        if (bg != None) {
- 
--            if ((window_input = modules->input->getwindow(i)) != None)
--                XReparentWindow(display, window_input, window, 0, 0);
++
 +            Window window_input = modules->input->getwindow(i);
 +            if (window_input != None)
 +                XReparentWindow(display, window_input, bg, 0, 0);
  
--            XMapWindow(display, window);
--            XRaiseWindow(display, window);
+-            if ((window_input = modules->input->getwindow(i)) != None)
+-                XReparentWindow(display, window_input, window, 0, 0);
 +            /* Listen for paint-related events from the background window */
 +            XSelectInput(display, bg, ExposureMask | StructureNotifyMask | VisibilityChangeMask);
  
+-            XMapWindow(display, window);
+-            XRaiseWindow(display, window);
 +            XMapWindow(display, bg);
 +            XRaiseWindow(display, bg);
-+
+ 
 +            bgwins[bgcount++] = bg;
          }
  
@@ -55,7 +66,7 @@ index 3cb09fd..4558e81 100644
 +    if (bgcount > 0) {
 +
 +        unsigned long start = alock_mtime();
-+        int painted = 0;
++        bool painted = true;
 +
 +        /*
 +         * Upper bound to avoid blocking forever; X11 gives no guarantee that
@@ -77,6 +88,10 @@ index 3cb09fd..4558e81 100644
 +                else if (ev.type == VisibilityNotify)
 +                    src = ev.xvisibility.window;
 +                else
++                    /*
++                    * Intentionally drain non-paint-related events (e.g. StructureNotify)
++                    * from the queue; they are not relevant to our painting check.
++                    */
 +                    continue;
 +
 +                /*
@@ -84,10 +99,9 @@ index 3cb09fd..4558e81 100644
 +                * meaningful; X11 may deliver expose/visibility events for unrelated
 +                * windows (e.g. root or WM-managed windows).
 +                */
-+                int j;
-+                for (j = 0; j < bgcount; j++)
++                for (int j = 0; j < bgcount; j++)
 +                    if (bgwins[j] == src) {
-+                        painted = 1;
++                        painted = true;
 +                        break;
 +                    }
 +
