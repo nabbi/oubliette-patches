@@ -1,0 +1,179 @@
+diff --git a/src/main.c b/src/main.c
+index e4cb32e..d1d4436 100644
+--- a/src/main.c
++++ b/src/main.c
+@@ -177,7 +177,8 @@ static void setBacklightBrightness(float value) {
+ 
+ /* Lock current display and grab pointer and keyboard. On successful
+  * lock this function returns 0, otherwise -1. */
+-static int lockDisplay(Display *display, struct aModules *modules) {
++static int lockDisplay(Display *display, struct aModules *modules,
++        Window **out_bgwins, int *out_bgcount) {
+ 
+     Window window;
+     Cursor cursor;
+@@ -187,6 +188,9 @@ static int lockDisplay(Display *display, struct aModules *modules) {
+ 
+     int bgcount = 0;
+ 
++    *out_bgwins = NULL;
++    *out_bgcount = 0;
++
+     if (bgwins == NULL) {
+         fprintf(stderr, "alock: error window out of memory\n");
+         return -1;
+@@ -281,8 +285,6 @@ static int lockDisplay(Display *display, struct aModules *modules) {
+         XSync(display, False);
+     }
+ 
+-    free(bgwins);
+-
+     /* grab pointer and keyboard from the default screen */
+     window = DefaultRootWindow(display);
+ 
+@@ -294,6 +296,7 @@ static int lockDisplay(Display *display, struct aModules *modules) {
+                 GrabModeAsync, GrabModeAsync, None,
+                 None, CurrentTime) != GrabSuccess) {
+         fprintf(stderr, "error: grab pointer failed\n");
++        free(bgwins);
+         return -1;
+     }
+ 
+@@ -310,14 +313,18 @@ static int lockDisplay(Display *display, struct aModules *modules) {
+         if (XGrabKeyboard(display, window, True, GrabModeAsync, GrabModeAsync,
+                     CurrentTime) != GrabSuccess) {
+             fprintf(stderr, "error: grab keyboard failed\n");
++            free(bgwins);
+             return -1;
+         }
+     }
+ 
++    *out_bgwins = bgwins;
++    *out_bgcount = bgcount;
+     return 0;
+ }
+ 
+-static void eventLoop(Display *display, struct aModules *modules) {
++static void eventLoop(Display *display, struct aModules *modules,
++        Window *bgwins, int bgcount) {
+ 
+     XEvent ev;
+     KeySym ks;
+@@ -327,6 +334,27 @@ static void eventLoop(Display *display, struct aModules *modules) {
+     unsigned int pass_pos = 0, pass_len = 0;
+     unsigned long keypress_time = 0;
+ 
++    const long evmask = KeyPressMask | StructureNotifyMask
++            | ExposureMask | VisibilityChangeMask;
++
++    /*
++     * Create an invisible 1x1 cursor used to force a cursor image refresh.
++     * Cycling the active grab cursor to this and back forces the X server
++     * to recompose the ARGB save-under buffer.
++     */
++    Cursor blank_cursor = None;
++    {
++        char data = 0;
++        XColor black = { 0 };
++        Pixmap bp = XCreateBitmapFromData(display,
++                DefaultRootWindow(display), &data, 1, 1);
++        if (bp != None) {
++            blank_cursor = XCreatePixmapCursor(display,
++                    bp, bp, &black, &black, 0, 0);
++            XFreePixmap(display, bp);
++        }
++    }
++
+     /* if possible do not page this address to the swap area */
+     mlock(pass, sizeof(pass));
+ 
+@@ -335,7 +363,7 @@ static void eventLoop(Display *display, struct aModules *modules) {
+ 
+         if (keypress_time) {
+             /* check for any key press event (or root window state change) */
+-            if (XCheckMaskEvent(display, KeyPressMask | StructureNotifyMask, &ev) == False) {
++            if (XCheckMaskEvent(display, evmask, &ev) == False) {
+ 
+                 /* user fell asleep while typing (5 seconds inactivity) */
+                 if (alock_mtime() - keypress_time > 5000) {
+@@ -357,7 +385,7 @@ static void eventLoop(Display *display, struct aModules *modules) {
+ #endif /* WITH_XBLIGHT */
+ 
+             /* block until any key press event arrives */
+-            XMaskEvent(display, KeyPressMask | StructureNotifyMask, &ev);
++            XMaskEvent(display, evmask, &ev);
+ 
+ #if WITH_XBLIGHT
+             /* restore original backlight brightness value */
+@@ -462,6 +490,8 @@ static void eventLoop(Display *display, struct aModules *modules) {
+ 
+                 if (rv == 0) { /* successful authentication */
+                     modules->input->setstate(AINPUT_STATE_VALID);
++                    if (blank_cursor != None)
++                        XFreeCursor(display, blank_cursor);
+                     return;
+                 }
+ 
+@@ -493,14 +523,34 @@ static void eventLoop(Display *display, struct aModules *modules) {
+             debug("received configure notify event");
+             break;
+ 
+-#if 0
+         case Expose:
+-            XClearWindow(dpy, ((XExposeEvent*)&ev)->window);
++        case VisibilityNotify: {
++            /*
++             * After resume from sleep the X server may repaint background
++             * windows, leaving the ARGB cursor's save-under buffer stale.
++             * Detect this and force a cursor refresh.
++             */
++            Window src = (ev.type == Expose)
++                    ? ev.xexpose.window : ev.xvisibility.window;
++            bool ours = false;
++            for (int j = 0; j < bgcount; j++)
++                if (bgwins[j] == src) { ours = true; break; }
++            if (ours && blank_cursor != None) {
++                debug("paint event on bg window, refreshing cursor");
++                Cursor real = modules->cursor->getcursor();
++                XChangeActivePointerGrab(display, 0, blank_cursor, CurrentTime);
++                XFlush(display);
++                XChangeActivePointerGrab(display, 0, real, CurrentTime);
++                XFlush(display);
++            }
+             break;
+-#endif
++        }
+ 
+         }
+     }
++
++    if (blank_cursor != None)
++        XFreeCursor(display, blank_cursor);
+ }
+ 
+ int main(int argc, char **argv) {
+@@ -731,11 +781,14 @@ int main(int argc, char **argv) {
+ 
+     /* raise our background window and grab input, if this action has failed,
+      * we are not able to lock the screen, then we're fucked... */
+-    if (lockDisplay(display, &modules))
++    Window *bgwins = NULL;
++    int bgcount = 0;
++
++    if (lockDisplay(display, &modules, &bgwins, &bgcount))
+         goto return_failure;
+ 
+     debug("entering main event loop");
+-    eventLoop(display, &modules);
++    eventLoop(display, &modules, bgwins, bgcount);
+ 
+     retval = EXIT_SUCCESS;
+     goto return_success;
+@@ -745,6 +798,7 @@ return_failure:
+ 
+ return_success:
+ 
++    free(bgwins);
+     modules.auth->m.free();
+     modules.cursor->m.free();
+     modules.input->m.free();
