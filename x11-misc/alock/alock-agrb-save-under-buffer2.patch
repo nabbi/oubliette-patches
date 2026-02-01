@@ -1,5 +1,5 @@
 diff --git a/src/main.c b/src/main.c
-index e4cb32e..d1d4436 100644
+index e4cb32e..0d9c1e2 100644
 --- a/src/main.c
 +++ b/src/main.c
 @@ -177,7 +177,8 @@ static void setBacklightBrightness(float value) {
@@ -59,17 +59,16 @@ index e4cb32e..d1d4436 100644
  
      XEvent ev;
      KeySym ks;
-@@ -327,6 +334,27 @@ static void eventLoop(Display *display, struct aModules *modules) {
+@@ -327,6 +334,26 @@ static void eventLoop(Display *display, struct aModules *modules) {
      unsigned int pass_pos = 0, pass_len = 0;
      unsigned long keypress_time = 0;
  
-+    const long evmask = KeyPressMask | StructureNotifyMask
-+            | ExposureMask | VisibilityChangeMask;
-+
 +    /*
 +     * Create an invisible 1x1 cursor used to force a cursor image refresh.
-+     * Cycling the active grab cursor to this and back forces the X server
-+     * to recompose the ARGB save-under buffer.
++     * When the X server repaints background windows (e.g. after resume from
++     * sleep), the ARGB cursor's save-under buffer may contain stale desktop
++     * content.  Cycling the grabbed cursor to this blank one and back forces
++     * the server to recapture the save-under from the now-correct background.
 +     */
 +    Cursor blank_cursor = None;
 +    {
@@ -87,25 +86,30 @@ index e4cb32e..d1d4436 100644
      /* if possible do not page this address to the swap area */
      mlock(pass, sizeof(pass));
  
-@@ -335,7 +363,7 @@ static void eventLoop(Display *display, struct aModules *modules) {
- 
-         if (keypress_time) {
-             /* check for any key press event (or root window state change) */
--            if (XCheckMaskEvent(display, KeyPressMask | StructureNotifyMask, &ev) == False) {
-+            if (XCheckMaskEvent(display, evmask, &ev) == False) {
- 
-                 /* user fell asleep while typing (5 seconds inactivity) */
-                 if (alock_mtime() - keypress_time > 5000) {
-@@ -357,7 +385,7 @@ static void eventLoop(Display *display, struct aModules *modules) {
- #endif /* WITH_XBLIGHT */
- 
+@@ -359,6 +386,22 @@ static void eventLoop(Display *display, struct aModules *modules) {
              /* block until any key press event arrives */
--            XMaskEvent(display, KeyPressMask | StructureNotifyMask, &ev);
-+            XMaskEvent(display, evmask, &ev);
+             XMaskEvent(display, KeyPressMask | StructureNotifyMask, &ev);
  
++            /*
++             * We just woke from idle.  Repaint background windows and refresh
++             * the grabbed cursor so its save-under buffer doesn't show stale
++             * desktop content (e.g. after resume from system sleep).
++             */
++            if (blank_cursor != None && bgcount > 0) {
++                for (int j = 0; j < bgcount; j++)
++                    XClearWindow(display, bgwins[j]);
++                XSync(display, False);
++                Cursor real = modules->cursor->getcursor();
++                XChangeActivePointerGrab(display, 0, blank_cursor, CurrentTime);
++                XFlush(display);
++                XChangeActivePointerGrab(display, 0, real, CurrentTime);
++                XFlush(display);
++            }
++
  #if WITH_XBLIGHT
              /* restore original backlight brightness value */
-@@ -462,6 +490,8 @@ static void eventLoop(Display *display, struct aModules *modules) {
+             if (modules->backlight != -1)
+@@ -462,6 +505,8 @@ static void eventLoop(Display *display, struct aModules *modules) {
  
                  if (rv == 0) { /* successful authentication */
                      modules->input->setstate(AINPUT_STATE_VALID);
@@ -114,36 +118,16 @@ index e4cb32e..d1d4436 100644
                      return;
                  }
  
-@@ -493,14 +523,34 @@ static void eventLoop(Display *display, struct aModules *modules) {
+@@ -493,14 +538,11 @@ static void eventLoop(Display *display, struct aModules *modules) {
              debug("received configure notify event");
              break;
  
 -#if 0
-         case Expose:
+-        case Expose:
 -            XClearWindow(dpy, ((XExposeEvent*)&ev)->window);
-+        case VisibilityNotify: {
-+            /*
-+             * After resume from sleep the X server may repaint background
-+             * windows, leaving the ARGB cursor's save-under buffer stale.
-+             * Detect this and force a cursor refresh.
-+             */
-+            Window src = (ev.type == Expose)
-+                    ? ev.xexpose.window : ev.xvisibility.window;
-+            bool ours = false;
-+            for (int j = 0; j < bgcount; j++)
-+                if (bgwins[j] == src) { ours = true; break; }
-+            if (ours && blank_cursor != None) {
-+                debug("paint event on bg window, refreshing cursor");
-+                Cursor real = modules->cursor->getcursor();
-+                XChangeActivePointerGrab(display, 0, blank_cursor, CurrentTime);
-+                XFlush(display);
-+                XChangeActivePointerGrab(display, 0, real, CurrentTime);
-+                XFlush(display);
-+            }
-             break;
+-            break;
 -#endif
-+        }
- 
+-
          }
      }
 +
@@ -152,7 +136,7 @@ index e4cb32e..d1d4436 100644
  }
  
  int main(int argc, char **argv) {
-@@ -731,11 +781,14 @@ int main(int argc, char **argv) {
+@@ -731,11 +773,14 @@ int main(int argc, char **argv) {
  
      /* raise our background window and grab input, if this action has failed,
       * we are not able to lock the screen, then we're fucked... */
@@ -169,7 +153,7 @@ index e4cb32e..d1d4436 100644
  
      retval = EXIT_SUCCESS;
      goto return_success;
-@@ -745,6 +798,7 @@ return_failure:
+@@ -745,6 +790,7 @@ return_failure:
  
  return_success:
  
