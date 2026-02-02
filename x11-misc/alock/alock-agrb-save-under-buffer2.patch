@@ -1,5 +1,5 @@
 diff --git a/src/main.c b/src/main.c
-index e4cb32e..0d9c1e2 100644
+index e4cb32e..307b92a 100644
 --- a/src/main.c
 +++ b/src/main.c
 @@ -177,7 +177,8 @@ static void setBacklightBrightness(float value) {
@@ -59,34 +59,7 @@ index e4cb32e..0d9c1e2 100644
  
      XEvent ev;
      KeySym ks;
-@@ -327,6 +334,26 @@ static void eventLoop(Display *display, struct aModules *modules) {
-     unsigned int pass_pos = 0, pass_len = 0;
-     unsigned long keypress_time = 0;
- 
-+    /*
-+     * Create an invisible 1x1 cursor used to force a cursor image refresh.
-+     * When the X server repaints background windows (e.g. after resume from
-+     * sleep), the ARGB cursor's save-under buffer may contain stale desktop
-+     * content.  Cycling the grabbed cursor to this blank one and back forces
-+     * the server to recapture the save-under from the now-correct background.
-+     */
-+    Cursor blank_cursor = None;
-+    {
-+        char data = 0;
-+        XColor black = { 0 };
-+        Pixmap bp = XCreateBitmapFromData(display,
-+                DefaultRootWindow(display), &data, 1, 1);
-+        if (bp != None) {
-+            blank_cursor = XCreatePixmapCursor(display,
-+                    bp, bp, &black, &black, 0, 0);
-+            XFreePixmap(display, bp);
-+        }
-+    }
-+
-     /* if possible do not page this address to the swap area */
-     mlock(pass, sizeof(pass));
- 
-@@ -359,6 +386,22 @@ static void eventLoop(Display *display, struct aModules *modules) {
+@@ -359,6 +366,25 @@ static void eventLoop(Display *display, struct aModules *modules) {
              /* block until any key press event arrives */
              XMaskEvent(display, KeyPressMask | StructureNotifyMask, &ev);
  
@@ -95,30 +68,24 @@ index e4cb32e..0d9c1e2 100644
 +             * the grabbed cursor so its save-under buffer doesn't show stale
 +             * desktop content (e.g. after resume from system sleep).
 +             */
-+            if (blank_cursor != None && bgcount > 0) {
++            if (bgcount > 0) {
 +                for (int j = 0; j < bgcount; j++)
 +                    XClearWindow(display, bgwins[j]);
 +                XSync(display, False);
-+                Cursor real = modules->cursor->getcursor();
-+                XChangeActivePointerGrab(display, 0, blank_cursor, CurrentTime);
-+                XFlush(display);
-+                XChangeActivePointerGrab(display, 0, real, CurrentTime);
-+                XFlush(display);
++
++                /* Warp the pointer by 1 pixel and back to force the X server
++                 * to re-composite the ARGB cursor against the now-repainted
++                 * background. */
++                XWarpPointer(display, None, None, 0, 0, 0, 0, 1, 0);
++                XSync(display, False);
++                XWarpPointer(display, None, None, 0, 0, 0, 0, -1, 0);
++                XSync(display, False);
 +            }
 +
  #if WITH_XBLIGHT
              /* restore original backlight brightness value */
              if (modules->backlight != -1)
-@@ -462,6 +505,8 @@ static void eventLoop(Display *display, struct aModules *modules) {
- 
-                 if (rv == 0) { /* successful authentication */
-                     modules->input->setstate(AINPUT_STATE_VALID);
-+                    if (blank_cursor != None)
-+                        XFreeCursor(display, blank_cursor);
-                     return;
-                 }
- 
-@@ -493,14 +538,11 @@ static void eventLoop(Display *display, struct aModules *modules) {
+@@ -493,14 +519,11 @@ static void eventLoop(Display *display, struct aModules *modules) {
              debug("received configure notify event");
              break;
  
@@ -136,7 +103,7 @@ index e4cb32e..0d9c1e2 100644
  }
  
  int main(int argc, char **argv) {
-@@ -731,11 +773,14 @@ int main(int argc, char **argv) {
+@@ -731,11 +754,14 @@ int main(int argc, char **argv) {
  
      /* raise our background window and grab input, if this action has failed,
       * we are not able to lock the screen, then we're fucked... */
@@ -153,7 +120,7 @@ index e4cb32e..0d9c1e2 100644
  
      retval = EXIT_SUCCESS;
      goto return_success;
-@@ -745,6 +790,7 @@ return_failure:
+@@ -745,6 +771,7 @@ return_failure:
  
  return_success:
  
