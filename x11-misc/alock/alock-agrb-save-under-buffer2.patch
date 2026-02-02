@@ -1,5 +1,5 @@
 diff --git a/src/main.c b/src/main.c
-index e4cb32e..307b92a 100644
+index e4cb32e..ca35223 100644
 --- a/src/main.c
 +++ b/src/main.c
 @@ -177,7 +177,8 @@ static void setBacklightBrightness(float value) {
@@ -85,7 +85,7 @@ index e4cb32e..307b92a 100644
  #if WITH_XBLIGHT
              /* restore original backlight brightness value */
              if (modules->backlight != -1)
-@@ -493,14 +519,11 @@ static void eventLoop(Display *display, struct aModules *modules) {
+@@ -493,14 +519,9 @@ static void eventLoop(Display *display, struct aModules *modules) {
              debug("received configure notify event");
              break;
  
@@ -98,12 +98,10 @@ index e4cb32e..307b92a 100644
          }
      }
 +
-+    if (blank_cursor != None)
-+        XFreeCursor(display, blank_cursor);
  }
  
  int main(int argc, char **argv) {
-@@ -731,11 +754,14 @@ int main(int argc, char **argv) {
+@@ -731,11 +752,14 @@ int main(int argc, char **argv) {
  
      /* raise our background window and grab input, if this action has failed,
       * we are not able to lock the screen, then we're fucked... */
@@ -120,7 +118,7 @@ index e4cb32e..307b92a 100644
  
      retval = EXIT_SUCCESS;
      goto return_success;
-@@ -745,6 +771,7 @@ return_failure:
+@@ -745,6 +769,7 @@ return_failure:
  
  return_success:
  
