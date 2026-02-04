@@ -25,7 +25,7 @@ index 5f45b5d..3c937e7 100644
  *.d
  config.mk
 diff --git a/src/main.c b/src/main.c
-index e4cb32e..4939fc7 100644
+index e4cb32e..f6530a6 100644
 --- a/src/main.c
 +++ b/src/main.c
 @@ -177,7 +177,8 @@ static void setBacklightBrightness(float value) {
@@ -34,22 +34,21 @@ index e4cb32e..4939fc7 100644
   * lock this function returns 0, otherwise -1. */
 -static int lockDisplay(Display *display, struct aModules *modules) {
 +static int lockDisplay(Display *display, struct aModules *modules,
-+        Window **out_bgwins, int *out_bgcount, Cursor *out_blank_cursor) {
++        Window **out_bgwins, int *out_bgcount) {
  
      Window window;
      Cursor cursor;
-@@ -187,6 +188,10 @@ static int lockDisplay(Display *display, struct aModules *modules) {
+@@ -187,6 +188,9 @@ static int lockDisplay(Display *display, struct aModules *modules) {
  
      int bgcount = 0;
  
 +    *out_bgwins = NULL;
 +    *out_bgcount = 0;
-+    *out_blank_cursor = None;
 +
      if (bgwins == NULL) {
          fprintf(stderr, "alock: error window out of memory\n");
          return -1;
-@@ -281,19 +286,35 @@ static int lockDisplay(Display *display, struct aModules *modules) {
+@@ -281,27 +285,23 @@ static int lockDisplay(Display *display, struct aModules *modules) {
          XSync(display, False);
      }
  
@@ -61,40 +60,32 @@ index e4cb32e..4939fc7 100644
      /*
 -     * Grab pointer first without a custom cursor, then switch to the real cursor.
 -     * This reduces "save-under" capturing pre-lock pixels on some servers/drivers.
-+     * Create a blank (fully opaque) 1x1 pixmap cursor.  We use this as the
-+     * initial grab cursor so the X server's save-under buffer never captures
-+     * pixels through an ARGB cursor's transparency.  The same cursor is later
-+     * reused in the event loop on wake-from-idle for the same purpose.
-+     */
-+    Cursor blank_cursor = None;
-+    {
-+        XColor black = {0};
-+        char no_data = 0;
-+        Pixmap bp = XCreateBitmapFromData(display, window, &no_data, 1, 1);
-+        blank_cursor = XCreatePixmapCursor(display, bp, bp, &black, &black, 0, 0);
-+        XFreePixmap(display, bp);
-+    }
-+
-+    /*
-+     * Grab pointer with the opaque blank cursor, then switch to the real cursor.
-+     * This prevents save-under from capturing pre-lock pixels through ARGB
-+     * cursor transparency on some servers/drivers.
++     * Grab pointer with the module cursor.  Background windows have already
++     * been mapped, raised, and painted (verified above), so the save-under
++     * buffer will capture lock-screen content rather than the desktop.
       */
++    cursor = modules->cursor->getcursor();
      if (XGrabPointer(display, window, False, 0,
                  GrabModeAsync, GrabModeAsync, None,
 -                None, CurrentTime) != GrabSuccess) {
-+                blank_cursor, CurrentTime) != GrabSuccess) {
++                cursor, CurrentTime) != GrabSuccess) {
          fprintf(stderr, "error: grab pointer failed\n");
-+        XFreeCursor(display, blank_cursor);
 +        free(bgwins);
          return -1;
      }
  
-@@ -310,14 +331,20 @@ static int lockDisplay(Display *display, struct aModules *modules) {
+-    XSync(display, False);
+-
+-    cursor = modules->cursor->getcursor();
+-    XChangeActivePointerGrab(display, 0, cursor, CurrentTime);
+-
+     /* try to grab 2 times, another process (windowmanager) may have grabbed
+      * the keyboard already */
+     if (XGrabKeyboard(display, window, True, GrabModeAsync, GrabModeAsync,
+@@ -310,14 +310,18 @@ static int lockDisplay(Display *display, struct aModules *modules) {
          if (XGrabKeyboard(display, window, True, GrabModeAsync, GrabModeAsync,
                      CurrentTime) != GrabSuccess) {
              fprintf(stderr, "error: grab keyboard failed\n");
-+            XFreeCursor(display, blank_cursor);
 +            free(bgwins);
              return -1;
          }
@@ -102,32 +93,36 @@ index e4cb32e..4939fc7 100644
  
 +    *out_bgwins = bgwins;
 +    *out_bgcount = bgcount;
-+    *out_blank_cursor = blank_cursor;
      return 0;
  }
  
 -static void eventLoop(Display *display, struct aModules *modules) {
 +static void eventLoop(Display *display, struct aModules *modules,
-+        Window *bgwins, int bgcount, Cursor blank_cursor) {
++        Window *bgwins, int bgcount) {
  
      XEvent ev;
      KeySym ks;
-@@ -359,6 +386,29 @@ static void eventLoop(Display *display, struct aModules *modules) {
+@@ -359,6 +363,35 @@ static void eventLoop(Display *display, struct aModules *modules) {
              /* block until any key press event arrives */
              XMaskEvent(display, KeyPressMask | StructureNotifyMask, &ev);
  
 +            /*
-+             * We just woke from idle.  After resume from system sleep, the
-+             * framebuffer may still contain pre-suspend desktop content.
-+             * With ARGB cursors (which have transparency), this stale content
-+             * would be visible through the cursor.
++             * We just woke from idle.  After resume from system sleep the
++             * X server's cursor sprite backing store may contain stale
++             * framebuffer content from before suspend.  With ARGB cursors
++             * (which have transparency) this old desktop content would be
++             * visible through the cursor.
 +             *
-+             * Fix: temporarily switch to an opaque cursor so that nothing can
-+             * show through, repaint the backgrounds, then restore the real
-+             * cursor once the framebuffer is fresh.
++             * Fix: release the pointer grab entirely (destroying the cursor
++             * sprite and its backing store), repaint the backgrounds, then
++             * re-grab with the ARGB cursor so the server captures a fresh
++             * backing store from the now-clean framebuffer.
++             *
++             * The keyboard remains grabbed and override-redirect background
++             * windows still cover the screen, so the brief ungrab is safe.
 +             */
-+            if (blank_cursor != None) {
-+                XChangeActivePointerGrab(display, 0, blank_cursor, CurrentTime);
++            if (bgcount > 0) {
++                XUngrabPointer(display, CurrentTime);
 +                XSync(display, False);
 +
 +                for (int j = 0; j < bgcount; j++)
@@ -135,14 +130,15 @@ index e4cb32e..4939fc7 100644
 +                XSync(display, False);
 +
 +                Cursor real = modules->cursor->getcursor();
-+                XChangeActivePointerGrab(display, 0, real, CurrentTime);
-+                XSync(display, False);
++                XGrabPointer(display, DefaultRootWindow(display), False, 0,
++                        GrabModeAsync, GrabModeAsync, None,
++                        real, CurrentTime);
 +            }
 +
  #if WITH_XBLIGHT
              /* restore original backlight brightness value */
              if (modules->backlight != -1)
-@@ -493,14 +543,9 @@ static void eventLoop(Display *display, struct aModules *modules) {
+@@ -493,14 +526,9 @@ static void eventLoop(Display *display, struct aModules *modules) {
              debug("received configure notify event");
              break;
  
@@ -158,30 +154,27 @@ index e4cb32e..4939fc7 100644
  }
  
  int main(int argc, char **argv) {
-@@ -731,11 +776,15 @@ int main(int argc, char **argv) {
+@@ -731,11 +759,14 @@ int main(int argc, char **argv) {
  
      /* raise our background window and grab input, if this action has failed,
       * we are not able to lock the screen, then we're fucked... */
 -    if (lockDisplay(display, &modules))
 +    Window *bgwins = NULL;
 +    int bgcount = 0;
-+    Cursor blank_cursor = None;
 +
-+    if (lockDisplay(display, &modules, &bgwins, &bgcount, &blank_cursor))
++    if (lockDisplay(display, &modules, &bgwins, &bgcount))
          goto return_failure;
  
      debug("entering main event loop");
 -    eventLoop(display, &modules);
-+    eventLoop(display, &modules, bgwins, bgcount, blank_cursor);
++    eventLoop(display, &modules, bgwins, bgcount);
  
      retval = EXIT_SUCCESS;
      goto return_success;
-@@ -745,6 +794,9 @@ return_failure:
+@@ -745,6 +776,7 @@ return_failure:
  
  return_success:
  
-+    if (blank_cursor != None)
-+        XFreeCursor(display, blank_cursor);
 +    free(bgwins);
      modules.auth->m.free();
      modules.cursor->m.free();
