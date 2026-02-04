@@ -1,5 +1,31 @@
+diff --git a/.gitignore b/.gitignore
+index 5f45b5d..3c937e7 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -21,6 +21,7 @@
+ *.i*86
+ *.x86_64
+ *.hex
++/src/alock
+ 
+ # Autotools
+ /autom4te.cache/
+@@ -34,6 +35,13 @@
+ Makefile.in
+ config.h.in
+ *~
++/Makefile
++/config.h
++/config.status
++/stamp-h1
++/doc/Makefile
++/src/Makefile
++/src/.deps/
+ 
+ *.d
+ config.mk
 diff --git a/src/main.c b/src/main.c
-index e4cb32e..ca35223 100644
+index e4cb32e..807055f 100644
 --- a/src/main.c
 +++ b/src/main.c
 @@ -177,7 +177,8 @@ static void setBacklightBrightness(float value) {
@@ -59,33 +85,66 @@ index e4cb32e..ca35223 100644
  
      XEvent ev;
      KeySym ks;
-@@ -359,6 +366,25 @@ static void eventLoop(Display *display, struct aModules *modules) {
+@@ -327,6 +334,19 @@ static void eventLoop(Display *display, struct aModules *modules) {
+     unsigned int pass_pos = 0, pass_len = 0;
+     unsigned long keypress_time = 0;
+ 
++    /* Create a blank (invisible, fully opaque) cursor used for cursor cycling
++     * on wake from idle.  Temporarily switching to this cursor while repainting
++     * backgrounds prevents stale framebuffer content from showing through ARGB
++     * cursor transparency (e.g. after resume from system sleep). */
++    Cursor blank_cursor = None;
++    if (bgcount > 0) {
++        XColor black = {0};
++        char no_data = 0;
++        Pixmap bp = XCreateBitmapFromData(display, DefaultRootWindow(display), &no_data, 1, 1);
++        blank_cursor = XCreatePixmapCursor(display, bp, bp, &black, &black, 0, 0);
++        XFreePixmap(display, bp);
++    }
++
+     /* if possible do not page this address to the swap area */
+     mlock(pass, sizeof(pass));
+ 
+@@ -359,6 +379,29 @@ static void eventLoop(Display *display, struct aModules *modules) {
              /* block until any key press event arrives */
              XMaskEvent(display, KeyPressMask | StructureNotifyMask, &ev);
  
 +            /*
-+             * We just woke from idle.  Repaint background windows and refresh
-+             * the grabbed cursor so its save-under buffer doesn't show stale
-+             * desktop content (e.g. after resume from system sleep).
++             * We just woke from idle.  After resume from system sleep, the
++             * framebuffer may still contain pre-suspend desktop content.
++             * With ARGB cursors (which have transparency), this stale content
++             * would be visible through the cursor.
++             *
++             * Fix: temporarily switch to an opaque cursor so that nothing can
++             * show through, repaint the backgrounds, then restore the real
++             * cursor once the framebuffer is fresh.
 +             */
-+            if (bgcount > 0) {
++            if (blank_cursor != None) {
++                XChangeActivePointerGrab(display, 0, blank_cursor, CurrentTime);
++                XSync(display, False);
++
 +                for (int j = 0; j < bgcount; j++)
 +                    XClearWindow(display, bgwins[j]);
 +                XSync(display, False);
 +
-+                /* Warp the pointer by 1 pixel and back to force the X server
-+                 * to re-composite the ARGB cursor against the now-repainted
-+                 * background. */
-+                XWarpPointer(display, None, None, 0, 0, 0, 0, 1, 0);
-+                XSync(display, False);
-+                XWarpPointer(display, None, None, 0, 0, 0, 0, -1, 0);
++                Cursor real = modules->cursor->getcursor();
++                XChangeActivePointerGrab(display, 0, real, CurrentTime);
 +                XSync(display, False);
 +            }
 +
  #if WITH_XBLIGHT
              /* restore original backlight brightness value */
              if (modules->backlight != -1)
-@@ -493,14 +519,9 @@ static void eventLoop(Display *display, struct aModules *modules) {
+@@ -462,6 +505,8 @@ static void eventLoop(Display *display, struct aModules *modules) {
+ 
+                 if (rv == 0) { /* successful authentication */
+                     modules->input->setstate(AINPUT_STATE_VALID);
++                    if (blank_cursor != None)
++                        XFreeCursor(display, blank_cursor);
+                     return;
+                 }
+ 
+@@ -493,14 +538,9 @@ static void eventLoop(Display *display, struct aModules *modules) {
              debug("received configure notify event");
              break;
  
@@ -101,7 +160,7 @@ index e4cb32e..ca35223 100644
  }
  
  int main(int argc, char **argv) {
-@@ -731,11 +752,14 @@ int main(int argc, char **argv) {
+@@ -731,11 +771,14 @@ int main(int argc, char **argv) {
  
      /* raise our background window and grab input, if this action has failed,
       * we are not able to lock the screen, then we're fucked... */
@@ -118,7 +177,7 @@ index e4cb32e..ca35223 100644
  
      retval = EXIT_SUCCESS;
      goto return_success;
-@@ -745,6 +769,7 @@ return_failure:
+@@ -745,6 +788,7 @@ return_failure:
  
  return_success:
  
