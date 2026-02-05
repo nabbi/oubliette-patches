@@ -25,7 +25,7 @@ index 5f45b5d..3c937e7 100644
  *.d
  config.mk
 diff --git a/src/main.c b/src/main.c
-index e4cb32e..af6bc9a 100644
+index e4cb32e..3b89df1 100644
 --- a/src/main.c
 +++ b/src/main.c
 @@ -177,7 +177,8 @@ static void setBacklightBrightness(float value) {
@@ -102,7 +102,7 @@ index e4cb32e..af6bc9a 100644
  
      XEvent ev;
      KeySym ks;
-@@ -359,6 +363,70 @@ static void eventLoop(Display *display, struct aModules *modules) {
+@@ -359,6 +363,37 @@ static void eventLoop(Display *display, struct aModules *modules) {
              /* block until any key press event arrives */
              XMaskEvent(display, KeyPressMask | StructureNotifyMask, &ev);
  
@@ -113,67 +113,34 @@ index e4cb32e..af6bc9a 100644
 +             * (which have transparency) this old desktop content would be
 +             * visible through the cursor.
 +             *
-+             * Fix: swap the grabbed cursor to a blank (invisible) one.
-+             * This forces the X server to discard the ARGB cursor sprite
-+             * and its stale backing store.  Repaint the backgrounds, then
-+             * swap back to the ARGB cursor so the server captures a fresh
-+             * backing store from the now-clean framebuffer.
-+             *
-+             * An XGetImage round-trip acts as a GPU fence, ensuring the
-+             * cleared content has reached the framebuffer before the ARGB
-+             * cursor sprite is recreated.
-+             *
-+             * Using XChangeActivePointerGrab keeps the grab held at all
-+             * times — no window underneath is ever briefly accessible.
++             * Fix: repaint backgrounds, then destroy the old cursor X
++             * resource and recreate it via the cursor module.  A new XID
++             * forces the X server (including NVIDIA proprietary drivers)
++             * to allocate fresh sprite storage — there is no old cache to
++             * hold onto.  XChangeActivePointerGrab installs the new cursor
++             * while keeping the grab held at all times.
 +             */
 +            if (bgcount > 0) {
-+                static Cursor blank = None;
-+                if (blank == None) {
-+                    char d = 0;
-+                    Pixmap pm = XCreateBitmapFromData(display,
-+                            DefaultRootWindow(display), &d, 1, 1);
-+                    XColor c = { 0 };
-+                    blank = XCreatePixmapCursor(display, pm, pm,
-+                            &c, &c, 0, 0);
-+                    XFreePixmap(display, pm);
-+                }
-+
-+                XChangeActivePointerGrab(display, 0, blank, CurrentTime);
-+                XSync(display, False);
-+
 +                for (int j = 0; j < bgcount; j++) {
 +                    XRaiseWindow(display, bgwins[j]);
 +                    XClearWindow(display, bgwins[j]);
 +                }
 +                XSync(display, False);
 +
-+                XImage *fence = XGetImage(display, bgwins[0],
-+                        0, 0, 1, 1, AllPlanes, ZPixmap);
-+                if (fence)
-+                    XDestroyImage(fence);
++                Cursor old = modules->cursor->getcursor();
++                if (old != None)
++                    XFreeCursor(display, old);
 +
-+                /*
-+                 * With software-rendered cursors the X server caches
-+                 * the pixels underneath the sprite ("save-under").
-+                 * That cache is only refreshed on pointer movement,
-+                 * NOT when the underlying window is repainted.  Nudge
-+                 * the pointer so the server re-captures its save-under
-+                 * from the now-clean background before we restore the
-+                 * ARGB cursor.
-+                 */
-+                XWarpPointer(display, None, None, 0, 0, 0, 0, 1, 0);
-+                XSync(display, False);
-+                XWarpPointer(display, None, None, 0, 0, 0, 0, -1, 0);
-+                XSync(display, False);
-+
-+                Cursor cur = modules->cursor->getcursor();
-+                XChangeActivePointerGrab(display, 0, cur, CurrentTime);
++                if (modules->cursor->m.init(display) == 0) {
++                    Cursor fresh = modules->cursor->getcursor();
++                    XChangeActivePointerGrab(display, 0, fresh, CurrentTime);
++                }
 +            }
 +
  #if WITH_XBLIGHT
              /* restore original backlight brightness value */
              if (modules->backlight != -1)
-@@ -493,14 +561,9 @@ static void eventLoop(Display *display, struct aModules *modules) {
+@@ -493,14 +528,9 @@ static void eventLoop(Display *display, struct aModules *modules) {
              debug("received configure notify event");
              break;
  
@@ -189,7 +156,7 @@ index e4cb32e..af6bc9a 100644
  }
  
  int main(int argc, char **argv) {
-@@ -731,11 +794,14 @@ int main(int argc, char **argv) {
+@@ -731,11 +761,14 @@ int main(int argc, char **argv) {
  
      /* raise our background window and grab input, if this action has failed,
       * we are not able to lock the screen, then we're fucked... */
@@ -206,7 +173,7 @@ index e4cb32e..af6bc9a 100644
  
      retval = EXIT_SUCCESS;
      goto return_success;
-@@ -745,6 +811,7 @@ return_failure:
+@@ -745,6 +778,7 @@ return_failure:
  
  return_success:
  
