@@ -25,7 +25,7 @@ index 5f45b5d..3c937e7 100644
  *.d
  config.mk
 diff --git a/src/main.c b/src/main.c
-index e4cb32e..88332c1 100644
+index e4cb32e..af6bc9a 100644
 --- a/src/main.c
 +++ b/src/main.c
 @@ -177,7 +177,8 @@ static void setBacklightBrightness(float value) {
@@ -102,7 +102,7 @@ index e4cb32e..88332c1 100644
  
      XEvent ev;
      KeySym ks;
-@@ -359,6 +363,56 @@ static void eventLoop(Display *display, struct aModules *modules) {
+@@ -359,6 +363,70 @@ static void eventLoop(Display *display, struct aModules *modules) {
              /* block until any key press event arrives */
              XMaskEvent(display, KeyPressMask | StructureNotifyMask, &ev);
  
@@ -152,6 +152,20 @@ index e4cb32e..88332c1 100644
 +                if (fence)
 +                    XDestroyImage(fence);
 +
++                /*
++                 * With software-rendered cursors the X server caches
++                 * the pixels underneath the sprite ("save-under").
++                 * That cache is only refreshed on pointer movement,
++                 * NOT when the underlying window is repainted.  Nudge
++                 * the pointer so the server re-captures its save-under
++                 * from the now-clean background before we restore the
++                 * ARGB cursor.
++                 */
++                XWarpPointer(display, None, None, 0, 0, 0, 0, 1, 0);
++                XSync(display, False);
++                XWarpPointer(display, None, None, 0, 0, 0, 0, -1, 0);
++                XSync(display, False);
++
 +                Cursor cur = modules->cursor->getcursor();
 +                XChangeActivePointerGrab(display, 0, cur, CurrentTime);
 +            }
@@ -159,7 +173,7 @@ index e4cb32e..88332c1 100644
  #if WITH_XBLIGHT
              /* restore original backlight brightness value */
              if (modules->backlight != -1)
-@@ -493,14 +547,9 @@ static void eventLoop(Display *display, struct aModules *modules) {
+@@ -493,14 +561,9 @@ static void eventLoop(Display *display, struct aModules *modules) {
              debug("received configure notify event");
              break;
  
@@ -175,7 +189,7 @@ index e4cb32e..88332c1 100644
  }
  
  int main(int argc, char **argv) {
-@@ -731,11 +780,14 @@ int main(int argc, char **argv) {
+@@ -731,11 +794,14 @@ int main(int argc, char **argv) {
  
      /* raise our background window and grab input, if this action has failed,
       * we are not able to lock the screen, then we're fucked... */
@@ -192,7 +206,7 @@ index e4cb32e..88332c1 100644
  
      retval = EXIT_SUCCESS;
      goto return_success;
-@@ -745,6 +797,7 @@ return_failure:
+@@ -745,6 +811,7 @@ return_failure:
  
  return_success:
  
