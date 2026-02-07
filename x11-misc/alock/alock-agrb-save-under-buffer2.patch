@@ -25,7 +25,7 @@ index 5f45b5d..3c937e7 100644
  *.d
  config.mk
 diff --git a/src/main.c b/src/main.c
-index e4cb32e..da435ae 100644
+index e4cb32e..8e701c6 100644
 --- a/src/main.c
 +++ b/src/main.c
 @@ -175,18 +175,100 @@ static void setBacklightBrightness(float value) {
@@ -131,7 +131,7 @@ index e4cb32e..da435ae 100644
      if (bgwins == NULL) {
          fprintf(stderr, "alock: error window out of memory\n");
          return -1;
-@@ -215,93 +297,22 @@ static int lockDisplay(Display *display, struct aModules *modules) {
+@@ -215,93 +297,23 @@ static int lockDisplay(Display *display, struct aModules *modules) {
          XSelectInput(display, RootWindow(display, i), StructureNotifyMask);
      }
  
@@ -210,7 +210,8 @@ index e4cb32e..da435ae 100644
 -     * Grab pointer first without a custom cursor, then switch to the real cursor.
 -     * This reduces "save-under" capturing pre-lock pixels on some servers/drivers.
 -     */
-+    Cursor blank = makeBlankCursor(display);
++    // Cursor blank = makeBlankCursor(display);
++    Cursor blank = modules->cursor->getcursor();
 +
      if (XGrabPointer(display, window, False, 0,
                  GrabModeAsync, GrabModeAsync, None,
@@ -230,7 +231,7 @@ index e4cb32e..da435ae 100644
      /* try to grab 2 times, another process (windowmanager) may have grabbed
       * the keyboard already */
      if (XGrabKeyboard(display, window, True, GrabModeAsync, GrabModeAsync,
-@@ -310,14 +321,29 @@ static int lockDisplay(Display *display, struct aModules *modules) {
+@@ -310,14 +322,29 @@ static int lockDisplay(Display *display, struct aModules *modules) {
          if (XGrabKeyboard(display, window, True, GrabModeAsync, GrabModeAsync,
                      CurrentTime) != GrabSuccess) {
              fprintf(stderr, "error: grab keyboard failed\n");
@@ -261,7 +262,7 @@ index e4cb32e..da435ae 100644
  
      XEvent ev;
      KeySym ks;
-@@ -359,6 +385,16 @@ static void eventLoop(Display *display, struct aModules *modules) {
+@@ -359,6 +386,16 @@ static void eventLoop(Display *display, struct aModules *modules) {
              /* block until any key press event arrives */
              XMaskEvent(display, KeyPressMask | StructureNotifyMask, &ev);
  
@@ -278,7 +279,7 @@ index e4cb32e..da435ae 100644
  #if WITH_XBLIGHT
              /* restore original backlight brightness value */
              if (modules->backlight != -1)
-@@ -493,12 +529,6 @@ static void eventLoop(Display *display, struct aModules *modules) {
+@@ -493,12 +530,6 @@ static void eventLoop(Display *display, struct aModules *modules) {
              debug("received configure notify event");
              break;
  
@@ -291,7 +292,7 @@ index e4cb32e..da435ae 100644
          }
      }
  }
-@@ -731,11 +761,15 @@ int main(int argc, char **argv) {
+@@ -731,11 +762,15 @@ int main(int argc, char **argv) {
  
      /* raise our background window and grab input, if this action has failed,
       * we are not able to lock the screen, then we're fucked... */
@@ -309,7 +310,7 @@ index e4cb32e..da435ae 100644
  
      retval = EXIT_SUCCESS;
      goto return_success;
-@@ -745,6 +779,9 @@ return_failure:
+@@ -745,6 +780,9 @@ return_failure:
  
  return_success:
  
