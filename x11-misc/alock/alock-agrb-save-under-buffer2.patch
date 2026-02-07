@@ -25,51 +25,199 @@ index 5f45b5d..3c937e7 100644
  *.d
  config.mk
 diff --git a/src/main.c b/src/main.c
-index e4cb32e..a728052 100644
+index e4cb32e..da435ae 100644
 --- a/src/main.c
 +++ b/src/main.c
-@@ -177,7 +177,8 @@ static void setBacklightBrightness(float value) {
+@@ -175,18 +175,100 @@ static void setBacklightBrightness(float value) {
+ }
+ #endif /* WITH_XBLIGHT */
  
++/*
++ * Poll for Expose/VisibilityNotify events from one of our background
++ * windows, confirming the GPU has actually rendered the content.
++ * Waits up to 500 ms with 10 ms sleep intervals.  Returns true if a
++ * paint event was seen, false on timeout.
++ */
++static bool waitForPaint(Display *display, const Window *bgwins,
++        int bgcount, long mask) {
++
++    unsigned long start = alock_mtime();
++    XEvent ev;
++
++    while (alock_mtime() - start < 500) {
++
++        while (XCheckMaskEvent(display, mask, &ev)) {
++
++            Window src = None;
++            if (ev.type == Expose)
++                src = ev.xexpose.window;
++            else if (ev.type == VisibilityNotify)
++                src = ev.xvisibility.window;
++            else
++                /* Drain non-paint events (e.g. StructureNotify) */
++                continue;
++
++            for (int j = 0; j < bgcount; j++)
++                if (bgwins[j] == src) {
++                    XSync(display, False);
++                    return true;
++                }
++        }
++        usleep(10000);
++    }
++
++    XSync(display, False);
++    return false;
++}
++
++/*
++ * Create a 1x1 fully transparent cursor (invisible).  Used as a safe
++ * placeholder during background repaints — unlike None (which shows the
++ * default arrow) this hides the pointer completely and has no alpha
++ * channel, so there is no save-under issue.
++ */
++static Cursor makeBlankCursor(Display *display) {
++
++    char data = 0;
++    XColor black = { 0 };
++    Pixmap blank = XCreateBitmapFromData(display,
++            DefaultRootWindow(display), &data, 1, 1);
++    Cursor cursor = XCreatePixmapCursor(display,
++            blank, blank, &black, &black, 0, 0);
++    XFreePixmap(display, blank);
++    return cursor;
++}
++
++/*
++ * Swap grabbed cursor to invisible, repaint backgrounds, wait for the
++ * GPU to finish rendering, then install the real cursor.  This ensures
++ * the ARGB cursor's save-under captures lock-screen content.
++ */
++static void reinstallCursor(Display *display, Cursor blank, Cursor real,
++        const Window *bgwins, int bgcount) {
++
++    XChangeActivePointerGrab(display, 0, blank, CurrentTime);
++
++    for (int j = 0; j < bgcount; j++) {
++        XRaiseWindow(display, bgwins[j]);
++        XClearWindow(display, bgwins[j]);
++    }
++    XSync(display, False);
++
++    waitForPaint(display, bgwins, bgcount,
++            ExposureMask | VisibilityChangeMask);
++
++    XChangeActivePointerGrab(display, 0, real, CurrentTime);
++}
++
  /* Lock current display and grab pointer and keyboard. On successful
   * lock this function returns 0, otherwise -1. */
 -static int lockDisplay(Display *display, struct aModules *modules) {
 +static int lockDisplay(Display *display, struct aModules *modules,
-+        Window **out_bgwins, int *out_bgcount) {
++        Window **out_bgwins, int *out_bgcount, Cursor *out_blank) {
  
      Window window;
-     Cursor cursor;
-@@ -187,6 +188,9 @@ static int lockDisplay(Display *display, struct aModules *modules) {
+-    Cursor cursor;
+ 
+     int nscreens = ScreenCount(display);
+     Window *bgwins = calloc(nscreens, sizeof(*bgwins));
  
      int bgcount = 0;
  
 +    *out_bgwins = NULL;
 +    *out_bgcount = 0;
++    *out_blank = None;
 +
      if (bgwins == NULL) {
          fprintf(stderr, "alock: error window out of memory\n");
          return -1;
-@@ -281,27 +285,23 @@ static int lockDisplay(Display *display, struct aModules *modules) {
-         XSync(display, False);
+@@ -215,93 +297,22 @@ static int lockDisplay(Display *display, struct aModules *modules) {
+         XSelectInput(display, RootWindow(display, i), StructureNotifyMask);
      }
  
+-    /*
+-     * Ensure requests are processed, then wait briefly for at least one
+-     * background window to become viewable / paint.
+-     */
+     XSync(display, False);
+ 
+-    if (bgcount > 0) {
+-
+-        unsigned long start = alock_mtime();
+-        bool painted = false;
+-
+-        /*
+-         * Upper bound to avoid blocking forever; X11 gives no guarantee that
+-         * expose or visibility events will ever arrive.
+-         */
+-        while (alock_mtime() - start < 500) {
+-
+-            XEvent ev;
+-
+-            /* Pump events; do not block hard forever */
+-            while (XCheckMaskEvent(display,
+-                        ExposureMask | StructureNotifyMask | VisibilityChangeMask,
+-                        &ev)) {
+-
+-                /* Only accept events from one of our background windows */
+-                Window src = None;
+-                if (ev.type == Expose)
+-                    src = ev.xexpose.window;
+-                else if (ev.type == VisibilityNotify)
+-                    src = ev.xvisibility.window;
+-                else
+-                    /*
+-                    * Intentionally drain non-paint-related events (e.g. StructureNotify)
+-                    * from the queue; they are not relevant to our painting check.
+-                    */
+-                    continue;
+-
+-                /*
+-                * Only treat paint-related events from our own background windows as
+-                * meaningful; X11 may deliver expose/visibility events for unrelated
+-                * windows (e.g. root or WM-managed windows).
+-                */
+-                for (int j = 0; j < bgcount; j++)
+-                    if (bgwins[j] == src) {
+-                        painted = true;
+-                        break;
+-                    }
+-
+-                if (painted)
+-                    break;
+-            }
+-
+-            if (painted)
+-                break;
+-
+-            /*
+-             * Yield briefly to let the server/compositor make progress without
+-             * busy-spinning while waiting for paint-related events.
+-             */
+-            usleep(10000);
+-        }
+-
+-        /* Final sync before cursor/grab */
+-        XSync(display, False);
+-    }
+-
 -    free(bgwins);
 -
      /* grab pointer and keyboard from the default screen */
      window = DefaultRootWindow(display);
  
-     /*
+-    /*
 -     * Grab pointer first without a custom cursor, then switch to the real cursor.
 -     * This reduces "save-under" capturing pre-lock pixels on some servers/drivers.
-+     * Grab pointer with the module cursor.  Background windows have already
-+     * been mapped, raised, and painted (verified above), so the save-under
-+     * buffer will capture lock-screen content rather than the desktop.
-      */
-+    cursor = modules->cursor->getcursor();
+-     */
++    Cursor blank = makeBlankCursor(display);
++
      if (XGrabPointer(display, window, False, 0,
                  GrabModeAsync, GrabModeAsync, None,
 -                None, CurrentTime) != GrabSuccess) {
-+                cursor, CurrentTime) != GrabSuccess) {
++                blank, CurrentTime) != GrabSuccess) {
          fprintf(stderr, "error: grab pointer failed\n");
++        XFreeCursor(display, blank);
 +        free(bgwins);
          return -1;
      }
@@ -82,101 +230,55 @@ index e4cb32e..a728052 100644
      /* try to grab 2 times, another process (windowmanager) may have grabbed
       * the keyboard already */
      if (XGrabKeyboard(display, window, True, GrabModeAsync, GrabModeAsync,
-@@ -310,14 +310,18 @@ static int lockDisplay(Display *display, struct aModules *modules) {
+@@ -310,14 +321,29 @@ static int lockDisplay(Display *display, struct aModules *modules) {
          if (XGrabKeyboard(display, window, True, GrabModeAsync, GrabModeAsync,
                      CurrentTime) != GrabSuccess) {
              fprintf(stderr, "error: grab keyboard failed\n");
++            XFreeCursor(display, blank);
 +            free(bgwins);
              return -1;
          }
      }
  
++    /* Grab is held with invisible cursor.  Now repaint, wait for GPU,
++     * and swap in the real cursor via the shared reinstallCursor path. */
++    if (bgcount > 0)
++        reinstallCursor(display, blank, modules->cursor->getcursor(),
++                bgwins, bgcount);
++    else
++        XChangeActivePointerGrab(display, 0,
++                modules->cursor->getcursor(), CurrentTime);
++
 +    *out_bgwins = bgwins;
 +    *out_bgcount = bgcount;
++    *out_blank = blank;
      return 0;
  }
  
 -static void eventLoop(Display *display, struct aModules *modules) {
 +static void eventLoop(Display *display, struct aModules *modules,
-+        Window *bgwins, int bgcount) {
++        Window *bgwins, int bgcount, Cursor blank) {
  
      XEvent ev;
      KeySym ks;
-@@ -359,6 +363,73 @@ static void eventLoop(Display *display, struct aModules *modules) {
+@@ -359,6 +385,16 @@ static void eventLoop(Display *display, struct aModules *modules) {
              /* block until any key press event arrives */
              XMaskEvent(display, KeyPressMask | StructureNotifyMask, &ev);
  
 +            /*
 +             * We just woke from idle.  After resume from system sleep the
-+             * X server's cursor sprite backing store may contain stale
-+             * framebuffer content from before suspend.  With ARGB cursors
-+             * (which have transparency) this old desktop content would be
-+             * visible through the cursor.
-+             *
-+             * Fix: repaint backgrounds, then destroy the old cursor X
-+             * resource and recreate it via the cursor module.  A new XID
-+             * forces the X server (including NVIDIA proprietary drivers)
-+             * to allocate fresh sprite storage — there is no old cache to
-+             * hold onto.  XChangeActivePointerGrab installs the new cursor
-+             * while keeping the grab held at all times.
++             * GPU framebuffer may contain stale content.  Use the same
++             * blank-cursor swap + repaint + waitForPaint sequence as the
++             * initial lock to ensure clean save-under for the ARGB cursor.
 +             */
-+            if (bgcount > 0) {
-+                for (int j = 0; j < bgcount; j++) {
-+                    XRaiseWindow(display, bgwins[j]);
-+                    XClearWindow(display, bgwins[j]);
-+                }
-+                XSync(display, False);
-+
-+                /*
-+                 * Wait for the cleared backgrounds to actually
-+                 * finish painting, the same way lockDisplay() does.
-+                 * XSync alone is not enough on NVIDIA — the GPU
-+                 * rendering pipeline may not have flushed yet.
-+                 */
-+                {
-+                    unsigned long start = alock_mtime();
-+                    bool repainted = false;
-+                    XEvent pev;
-+
-+                    while (alock_mtime() - start < 500) {
-+                        while (XCheckMaskEvent(display,
-+                                    ExposureMask | VisibilityChangeMask, &pev)) {
-+                            Window src = None;
-+                            if (pev.type == Expose)
-+                                src = pev.xexpose.window;
-+                            else if (pev.type == VisibilityNotify)
-+                                src = pev.xvisibility.window;
-+                            else
-+                                continue;
-+                            for (int j = 0; j < bgcount; j++)
-+                                if (bgwins[j] == src) {
-+                                    repainted = true;
-+                                    break;
-+                                }
-+                            if (repainted)
-+                                break;
-+                        }
-+                        if (repainted)
-+                            break;
-+                        usleep(10000);
-+                    }
-+                    XSync(display, False);
-+                }
-+
-+                Cursor old = modules->cursor->getcursor();
-+                if (old != None)
-+                    XFreeCursor(display, old);
-+
-+                if (modules->cursor->m.init(display) == 0) {
-+                    Cursor fresh = modules->cursor->getcursor();
-+                    XChangeActivePointerGrab(display, 0, fresh, CurrentTime);
-+                }
-+            }
++            if (bgcount > 0)
++                reinstallCursor(display, blank,
++                        modules->cursor->getcursor(), bgwins, bgcount);
 +
  #if WITH_XBLIGHT
              /* restore original backlight brightness value */
              if (modules->backlight != -1)
-@@ -493,14 +564,9 @@ static void eventLoop(Display *display, struct aModules *modules) {
+@@ -493,12 +529,6 @@ static void eventLoop(Display *display, struct aModules *modules) {
              debug("received configure notify event");
              break;
  
@@ -188,32 +290,32 @@ index e4cb32e..a728052 100644
 -
          }
      }
-+
  }
- 
- int main(int argc, char **argv) {
-@@ -731,11 +797,14 @@ int main(int argc, char **argv) {
+@@ -731,11 +761,15 @@ int main(int argc, char **argv) {
  
      /* raise our background window and grab input, if this action has failed,
       * we are not able to lock the screen, then we're fucked... */
 -    if (lockDisplay(display, &modules))
 +    Window *bgwins = NULL;
 +    int bgcount = 0;
++    Cursor blank = None;
 +
-+    if (lockDisplay(display, &modules, &bgwins, &bgcount))
++    if (lockDisplay(display, &modules, &bgwins, &bgcount, &blank))
          goto return_failure;
  
      debug("entering main event loop");
 -    eventLoop(display, &modules);
-+    eventLoop(display, &modules, bgwins, bgcount);
++    eventLoop(display, &modules, bgwins, bgcount, blank);
  
      retval = EXIT_SUCCESS;
      goto return_success;
-@@ -745,6 +814,7 @@ return_failure:
+@@ -745,6 +779,9 @@ return_failure:
  
  return_success:
  
 +    free(bgwins);
++    if (blank != None)
++        XFreeCursor(display, blank);
      modules.auth->m.free();
      modules.cursor->m.free();
      modules.input->m.free();
