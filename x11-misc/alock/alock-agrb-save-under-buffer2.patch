@@ -25,10 +25,10 @@ index 5f45b5d..3c937e7 100644
  *.d
  config.mk
 diff --git a/src/main.c b/src/main.c
-index e4cb32e..699499a 100644
+index e4cb32e..49ba51e 100644
 --- a/src/main.c
 +++ b/src/main.c
-@@ -175,18 +175,100 @@ static void setBacklightBrightness(float value) {
+@@ -175,18 +175,118 @@ static void setBacklightBrightness(float value) {
  }
  #endif /* WITH_XBLIGHT */
  
@@ -90,10 +90,14 @@ index e4cb32e..699499a 100644
 +
 +/*
 + * Swap grabbed cursor to invisible, repaint backgrounds, wait for the
-+ * GPU to finish rendering, then install the real cursor.  This ensures
-+ * the ARGB cursor's save-under captures lock-screen content.
++ * GPU to finish rendering, then destroy and recreate the real cursor
++ * before installing it.  The new XID forces the X server (including
++ * NVIDIA's cursor compositing) to allocate fresh sprite storage and
++ * capture the save-under from the now-clean framebuffer, rather than
++ * reusing stale cached data from before suspend.
 + */
-+static void reinstallCursor(Display *display, Cursor blank, Cursor real,
++static void reinstallCursor(Display *display, Cursor blank,
++        struct aModuleCursor *cursor_module,
 +        const Window *bgwins, int bgcount) {
 +
 +    XChangeActivePointerGrab(display, 0, blank, CurrentTime);
@@ -107,7 +111,21 @@ index e4cb32e..699499a 100644
 +    waitForPaint(display, bgwins, bgcount,
 +            ExposureMask | VisibilityChangeMask);
 +
-+    XChangeActivePointerGrab(display, 0, real, CurrentTime);
++    /* Destroy the old cursor and recreate with a fresh XID. */
++    Cursor old = cursor_module->getcursor();
++    if (old != None) {
++        XFreeCursor(display, old);
++        if (cursor_module->m.init(display) != 0) {
++            /* Reinit failed; stay with blank cursor as a safe
++             * fallback — no alpha, so no save-under issue. */
++            fprintf(stderr, "alock: warning, cursor reinit failed\n");
++            XChangeActivePointerGrab(display, 0, blank, CurrentTime);
++            return;
++        }
++    }
++
++    XChangeActivePointerGrab(display, 0,
++            cursor_module->getcursor(), CurrentTime);
 +}
 +
  /* Lock current display and grab pointer and keyboard. On successful
@@ -131,7 +149,7 @@ index e4cb32e..699499a 100644
      if (bgwins == NULL) {
          fprintf(stderr, "alock: error window out of memory\n");
          return -1;
-@@ -215,93 +297,22 @@ static int lockDisplay(Display *display, struct aModules *modules) {
+@@ -215,93 +315,22 @@ static int lockDisplay(Display *display, struct aModules *modules) {
          XSelectInput(display, RootWindow(display, i), StructureNotifyMask);
      }
  
@@ -230,7 +248,7 @@ index e4cb32e..699499a 100644
      /* try to grab 2 times, another process (windowmanager) may have grabbed
       * the keyboard already */
      if (XGrabKeyboard(display, window, True, GrabModeAsync, GrabModeAsync,
-@@ -310,14 +321,29 @@ static int lockDisplay(Display *display, struct aModules *modules) {
+@@ -310,14 +339,29 @@ static int lockDisplay(Display *display, struct aModules *modules) {
          if (XGrabKeyboard(display, window, True, GrabModeAsync, GrabModeAsync,
                      CurrentTime) != GrabSuccess) {
              fprintf(stderr, "error: grab keyboard failed\n");
@@ -243,7 +261,7 @@ index e4cb32e..699499a 100644
 +    /* Grab is held with invisible cursor.  Now repaint, wait for GPU,
 +     * and swap in the real cursor via the shared reinstallCursor path. */
 +    if (bgcount > 0)
-+        reinstallCursor(display, blank, modules->cursor->getcursor(),
++        reinstallCursor(display, blank, modules->cursor,
 +                bgwins, bgcount);
 +    else
 +        XChangeActivePointerGrab(display, 0,
@@ -261,7 +279,7 @@ index e4cb32e..699499a 100644
  
      XEvent ev;
      KeySym ks;
-@@ -359,6 +385,16 @@ static void eventLoop(Display *display, struct aModules *modules) {
+@@ -359,6 +403,16 @@ static void eventLoop(Display *display, struct aModules *modules) {
              /* block until any key press event arrives */
              XMaskEvent(display, KeyPressMask | StructureNotifyMask, &ev);
  
@@ -273,12 +291,12 @@ index e4cb32e..699499a 100644
 +             */
 +            if (bgcount > 0)
 +                reinstallCursor(display, blank,
-+                        modules->cursor->getcursor(), bgwins, bgcount);
++                        modules->cursor, bgwins, bgcount);
 +
  #if WITH_XBLIGHT
              /* restore original backlight brightness value */
              if (modules->backlight != -1)
-@@ -493,12 +529,6 @@ static void eventLoop(Display *display, struct aModules *modules) {
+@@ -493,12 +547,6 @@ static void eventLoop(Display *display, struct aModules *modules) {
              debug("received configure notify event");
              break;
  
@@ -291,7 +309,7 @@ index e4cb32e..699499a 100644
          }
      }
  }
-@@ -731,11 +761,15 @@ int main(int argc, char **argv) {
+@@ -731,11 +779,15 @@ int main(int argc, char **argv) {
  
      /* raise our background window and grab input, if this action has failed,
       * we are not able to lock the screen, then we're fucked... */
@@ -309,7 +327,7 @@ index e4cb32e..699499a 100644
  
      retval = EXIT_SUCCESS;
      goto return_success;
-@@ -745,6 +779,9 @@ return_failure:
+@@ -745,6 +797,9 @@ return_failure:
  
  return_success:
  
