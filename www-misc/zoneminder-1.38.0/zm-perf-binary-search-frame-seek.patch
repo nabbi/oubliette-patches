@@ -1,5 +1,5 @@
 diff --git a/src/zm_eventstream.cpp b/src/zm_eventstream.cpp
-index 47bab24a7..9f6a433c0 100644
+index fab46ae83..eeab97656 100644
 --- a/src/zm_eventstream.cpp
 +++ b/src/zm_eventstream.cpp
 @@ -28,6 +28,7 @@
@@ -10,7 +10,7 @@ index 47bab24a7..9f6a433c0 100644
  #include <filesystem>
  
  #ifdef __FreeBSD__
-@@ -88,18 +89,42 @@ bool EventStream::seek(SystemTimePoint event_time) {
+@@ -86,18 +87,42 @@ bool EventStream::seek(SystemTimePoint event_time) {
      return false;
    }
  
@@ -64,7 +64,7 @@ index 47bab24a7..9f6a433c0 100644
      Warning("Requested an event time less than the start of the event. event_time %" PRIi64 " < start_time %" PRIi64,
          static_cast<int64>(std::chrono::duration_cast<Seconds>(event_time.time_since_epoch()).count()),
          static_cast<int64>(std::chrono::duration_cast<Seconds>(event_data->start_time.time_since_epoch()).count()));
-@@ -597,47 +622,21 @@ void EventStream::processCommand(const CmdMsg *msg) {
+@@ -595,46 +620,21 @@ void EventStream::processCommand(const CmdMsg *msg) {
      }
  
      std::scoped_lock lck{mutex};
@@ -84,8 +84,7 @@ index 47bab24a7..9f6a433c0 100644
 -            curr_frame_id,
 -            FPSeconds(event_data->frames[curr_frame_id - 1].offset).count()
 -           );
--      while ((curr_frame_id > 1) && (event_data->frames[curr_frame_id - 2].offset > offset)) {
--        curr_frame_id--;
+-      while ((curr_frame_id--) && (event_data->frames[curr_frame_id - 1].offset > offset)) {
 -        Debug(1, "Searching for frame at %.6f, offset of frame %d is %.6f",
 -              FPSeconds(offset).count(),
 -              curr_frame_id,
