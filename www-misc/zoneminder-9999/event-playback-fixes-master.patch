@@ -434,45 +434,54 @@ index 47bab24a7..b12737234 100644
        }  // end if checkEventLoaded
      }  // end scope for lock
 diff --git a/web/skins/classic/views/js/event.js b/web/skins/classic/views/js/event.js
-index 8bf67c9e7..c2e2b01c7 100644
+index 8bf67c9e7..99fb2e288 100644
 --- a/web/skins/classic/views/js/event.js
 +++ b/web/skins/classic/views/js/event.js
-@@ -30,6 +30,7 @@ var streamCmdInterval = null;
- var streamStatus = null;
- var lastEventId = 0;
- var zmsBroke = false; //Use alternate navigation if zms has crashed
-+var pendingSeek = null; // Queued seek offset for after zms stream restart
- var wasHidden = false;
- var availableTags = [];
- var selectedTags = [];
-@@ -444,6 +445,13 @@ function getCmdResponse(respObj, respText) {
+@@ -548,14 +548,7 @@ function playClicked( ) {
+     }
+   } else {
+     if (zmsBroke) {
+-      // The assumption is that the command failed because zms exited, so restart the stream.
+-      const img = document.getElementById('evtStream');
+-      const src = img.src;
+-      const url = new URL(src);
+-      url.searchParams.set('scale', currentScale); // In event.php we don’t yet know what scale to substitute. Let it be for now.
+-      img.src = '';
+-      img.src = url;
+-      zmsBroke = false;
++      restartZmsStream();
+     } else {
+       streamReq({command: CMD_PLAY});
+     }
+@@ -823,11 +816,33 @@ function streamPan(x, y) {
+ }
+ */
  
-   zmsBroke = false;
- 
-+  // Execute any pending seek queued during a stream restart
-+  if (pendingSeek !== null) {
-+    const offset = pendingSeek;
-+    pendingSeek = null;
-+    streamSeek(offset);
-+  }
++// Restart the zms stream by resetting the <img> src. The browser makes a
++// new CGI request to zms (same connkey), spawning a fresh process. When the
++// new zms delivers its first MJPEG frame, img.onload fires as a reliable
++// signal that the command socket is ready. Optional onReady callback is
++// invoked at that point to send queued commands (e.g. CMD_SEEK).
++function restartZmsStream(onReady) {
++  const img = document.getElementById('evtStream');
++  const url = new URL(img.src);
++  url.searchParams.set('scale', currentScale);
++  img.src = '';
++  img.onload = function() {
++    img.onload = null;
++    zmsBroke = false;
++    if (onReady) onReady();
++  };
++  img.src = url.href;
++}
 +
-   streamStatus = respObj.status;
-   if (!streamStatus) {
-     console.log('No status in respObj');
-@@ -827,7 +835,18 @@ function streamSeek(offset) {
+ function streamSeek(offset) {
    if (vid) {
      vid.currentTime(offset);
    } else {
 -    streamReq({command: CMD_SEEK, offset: offset});
 +    if (zmsBroke) {
-+      // zms has exited; restart stream and queue seek for when it's ready
-+      pendingSeek = offset;
-+      const img = document.getElementById('evtStream');
-+      const url = new URL(img.src);
-+      url.searchParams.set('scale', currentScale);
-+      img.src = '';
-+      img.src = url.href;
-+      zmsBroke = false;
++      restartZmsStream(function() { streamSeek(offset); });
 +    } else {
 +      streamReq({command: CMD_SEEK, offset: offset});
 +    }
