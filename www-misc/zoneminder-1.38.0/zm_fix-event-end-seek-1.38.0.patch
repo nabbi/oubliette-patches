@@ -1,5 +1,5 @@
 diff --git a/src/zm_eventstream.cpp b/src/zm_eventstream.cpp
-index fab46ae83..879014e05 100644
+index fab46ae83..45224c810 100644
 --- a/src/zm_eventstream.cpp
 +++ b/src/zm_eventstream.cpp
 @@ -790,6 +790,10 @@ bool EventStream::checkEventLoaded() {
@@ -21,7 +21,18 @@ index fab46ae83..879014e05 100644
    while (!zm_terminate) {
      now = start = std::chrono::steady_clock::now();
  
-@@ -1180,6 +1185,13 @@ void EventStream::runStream() {
+@@ -1160,7 +1165,9 @@ void EventStream::runStream() {
+ 
+         // This next bit is to determine if we are in the current event time wise
+         // and whether to show an image saying how long until the next event.
+-        if (replay_rate > 0) {
++        if (event_data->frames.empty()) {
++          Debug(1, "New event has no frames yet, skipping time_to_event calculation");
++        } else if (replay_rate > 0) {
+           // This doesn't make sense unless we have hit the end of the event.
+           time_to_event = event_data->frames[0].timestamp - curr_stream_time;
+           Debug(1, "replay rate (%d) time_to_event (%f s) = frame timestamp (%f s) - curr_stream_time (%f s)",
+@@ -1180,6 +1187,13 @@ void EventStream::runStream() {
        }  // end if checkEventLoaded
      }  // end scope for lock
    }  // end while ! zm_terminate
