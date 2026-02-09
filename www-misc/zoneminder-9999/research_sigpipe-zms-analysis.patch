@@ -1,0 +1,37 @@
+commit 8ea4bc15a95fe13dd583fd00ee4c2c20676ac52f
+Author: Nic Boet <nic@boet.cc>
+Date:   Sun Feb 8 22:38:38 2026 -0600
+
+    fix: ignore SIGPIPE in zms to survive broken HTTP connections
+    
+    When the browser closes the connection (e.g. navigating away or stream
+    restart), the next write to stdout delivers SIGPIPE which kills the zms
+    process. This is standard behavior for HTTP streaming servers and the
+    fix is to ignore SIGPIPE so write() returns EPIPE instead, allowing
+    graceful error handling.
+    
+    Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>
+
+diff --git a/src/zms.cpp b/src/zms.cpp
+index 9ff4be502..dddc03e33 100644
+--- a/src/zms.cpp
++++ b/src/zms.cpp
+@@ -24,6 +24,7 @@
+ #include "zm_monitorstream.h"
+ #include "zm_eventstream.h"
+ #include "zm_fifo_stream.h"
++#include <csignal>
+ #include <iomanip>
+ #include <sstream>
+ #include <string>
+@@ -276,6 +277,10 @@ int main(int argc, const char *argv[], char **envp) {
+   Image::Initialise();
+   zmSetDefaultTermHandler();
+   zmSetDefaultDieHandler();
++  // Ignore SIGPIPE so broken HTTP connections return EPIPE from write()
++  // instead of killing the process. Without this, the 5-second keepalive
++  // gap after event end causes zms to die on the next stdout write.
++  std::signal(SIGPIPE, SIG_IGN);
+ 
+   setbuf(stdout, nullptr);
+   if ( nph ) {
