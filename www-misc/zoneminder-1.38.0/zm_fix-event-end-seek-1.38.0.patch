@@ -1,0 +1,61 @@
+diff --git a/src/zm_eventstream.cpp b/src/zm_eventstream.cpp
+index fab46ae83..2fe6d53e8 100644
+--- a/src/zm_eventstream.cpp
++++ b/src/zm_eventstream.cpp
+@@ -790,6 +790,10 @@ bool EventStream::checkEventLoaded() {
+     Debug(2, "Pausing because mode is %s", StreamMode_Strings[mode].c_str());
+     curr_frame_id = curr_frame_id <= 0 ? 1 : event_data->last_frame_id;
+     paused = true;
++    // Reset last_frame_sent so the next loop iteration sends a keepalive
++    // immediately, rather than leaving a 5-second gap (MAX_STREAM_DELAY)
++    // during which the HTTP connection can time out and break the pipe.
++    last_frame_sent = {};
+   }
+   return false;
+ }  // void EventStream::checkEventLoaded()
+diff --git a/web/skins/classic/views/js/event.js b/web/skins/classic/views/js/event.js
+index 8d6121e4a..908ddcf4b 100644
+--- a/web/skins/classic/views/js/event.js
++++ b/web/skins/classic/views/js/event.js
+@@ -30,6 +30,7 @@ var streamCmdInterval = null;
+ var streamStatus = null;
+ var lastEventId = 0;
+ var zmsBroke = false; //Use alternate navigation if zms has crashed
++var pendingSeek = null; // Queued seek offset for after zms stream restart
+ var wasHidden = false;
+ var availableTags = [];
+ var selectedTags = [];
+@@ -444,6 +445,13 @@ function getCmdResponse(respObj, respText) {
+ 
+   zmsBroke = false;
+ 
++  // Execute any pending seek queued during a stream restart
++  if (pendingSeek !== null) {
++    const offset = pendingSeek;
++    pendingSeek = null;
++    streamSeek(offset);
++  }
++
+   streamStatus = respObj.status;
+   if (!streamStatus) {
+     console.log('No status in respObj');
+@@ -823,7 +831,18 @@ function streamSeek(offset) {
+   if (vid) {
+     vid.currentTime(offset);
+   } else {
+-    streamReq({command: CMD_SEEK, offset: offset});
++    if (zmsBroke) {
++      // zms has exited; restart stream and queue seek for when it's ready
++      pendingSeek = offset;
++      const img = document.getElementById('evtStream');
++      const url = new URL(img.src);
++      url.searchParams.set('scale', currentScale);
++      img.src = '';
++      img.src = url.href;
++      zmsBroke = false;
++    } else {
++      streamReq({command: CMD_SEEK, offset: offset});
++    }
+   }
+ }
+ 
