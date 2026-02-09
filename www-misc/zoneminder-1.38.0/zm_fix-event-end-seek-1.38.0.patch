@@ -1,5 +1,5 @@
 diff --git a/src/zm_eventstream.cpp b/src/zm_eventstream.cpp
-index fab46ae83..2fe6d53e8 100644
+index fab46ae83..879014e05 100644
 --- a/src/zm_eventstream.cpp
 +++ b/src/zm_eventstream.cpp
 @@ -790,6 +790,10 @@ bool EventStream::checkEventLoaded() {
@@ -13,6 +13,77 @@ index fab46ae83..2fe6d53e8 100644
    }
    return false;
  }  // void EventStream::checkEventLoaded()
+@@ -973,6 +977,7 @@ void EventStream::runStream() {
+   // Has to go here, at the moment, for sendFrame(delta).
+   Microseconds delta = Microseconds(0);
+ 
++  try {
+   while (!zm_terminate) {
+     now = start = std::chrono::steady_clock::now();
+ 
+@@ -1180,6 +1185,13 @@ void EventStream::runStream() {
+       }  // end if checkEventLoaded
+     }  // end scope for lock
+   }  // end while ! zm_terminate
++  } catch (const std::exception &e) {
++    Error("Exception in runStream: %s", e.what());
++    zm_terminate = true;
++  } catch (...) {
++    Error("Unknown exception in runStream");
++    zm_terminate = true;
++  }
+ 
+   if (type == STREAM_MPEG) {
+     delete vid_stream;
+diff --git a/src/zm_stream.cpp b/src/zm_stream.cpp
+index f958bcdff..24abe495f 100644
+--- a/src/zm_stream.cpp
++++ b/src/zm_stream.cpp
+@@ -114,6 +114,7 @@ void StreamBase::updateFrameRate(double fps) {
+ 
+ void StreamBase::checkCommandQueue() {
+   while (!zm_terminate) {
++    try {
+     // Update modified time of the socket .lock file so that we can tell which ones are stale.
+     if (now - last_comm_update > Hours(1)) {
+       touch(sock_path_lock);
+@@ -139,6 +140,13 @@ void StreamBase::checkCommandQueue() {
+       // Perfectly valid if only getting a snapshot
+       Debug(1, "No sd in checkCommandQueue, comms not open.");
+     }
++    } catch (const std::exception &e) {
++      Error("Exception in checkCommandQueue: %s", e.what());
++      zm_terminate = true;
++    } catch (...) {
++      Error("Unknown exception in checkCommandQueue");
++      zm_terminate = true;
++    }
+   } // end while !zm_terminate
+ }  // end void StreamBase::checkCommandQueue()
+ 
+diff --git a/src/zms.cpp b/src/zms.cpp
+index 9ff4be502..dddc03e33 100644
+--- a/src/zms.cpp
++++ b/src/zms.cpp
+@@ -24,6 +24,7 @@
+ #include "zm_monitorstream.h"
+ #include "zm_eventstream.h"
+ #include "zm_fifo_stream.h"
++#include <csignal>
+ #include <iomanip>
+ #include <sstream>
+ #include <string>
+@@ -276,6 +277,10 @@ int main(int argc, const char *argv[], char **envp) {
+   Image::Initialise();
+   zmSetDefaultTermHandler();
+   zmSetDefaultDieHandler();
++  // Ignore SIGPIPE so broken HTTP connections return EPIPE from write()
++  // instead of killing the process. Without this, the 5-second keepalive
++  // gap after event end causes zms to die on the next stdout write.
++  std::signal(SIGPIPE, SIG_IGN);
+ 
+   setbuf(stdout, nullptr);
+   if ( nph ) {
 diff --git a/web/skins/classic/views/js/event.js b/web/skins/classic/views/js/event.js
 index 8d6121e4a..908ddcf4b 100644
 --- a/web/skins/classic/views/js/event.js
