@@ -442,29 +442,6 @@ index fab46ae83..c63dc62f4 100644
          }  // end if forward or reverse
        }  // end if checkEventLoaded
      }  // end scope for lock
-diff --git a/src/zms.cpp b/src/zms.cpp
-index 9ff4be502..dddc03e33 100644
---- a/src/zms.cpp
-+++ b/src/zms.cpp
-@@ -24,6 +24,7 @@
- #include "zm_monitorstream.h"
- #include "zm_eventstream.h"
- #include "zm_fifo_stream.h"
-+#include <csignal>
- #include <iomanip>
- #include <sstream>
- #include <string>
-@@ -276,6 +277,10 @@ int main(int argc, const char *argv[], char **envp) {
-   Image::Initialise();
-   zmSetDefaultTermHandler();
-   zmSetDefaultDieHandler();
-+  // Ignore SIGPIPE so broken HTTP connections return EPIPE from write()
-+  // instead of killing the process. Without this, the 5-second keepalive
-+  // gap after event end causes zms to die on the next stdout write.
-+  std::signal(SIGPIPE, SIG_IGN);
- 
-   setbuf(stdout, nullptr);
-   if ( nph ) {
 diff --git a/web/skins/classic/views/js/event.js b/web/skins/classic/views/js/event.js
 index 8d6121e4a..908ddcf4b 100644
 --- a/web/skins/classic/views/js/event.js
