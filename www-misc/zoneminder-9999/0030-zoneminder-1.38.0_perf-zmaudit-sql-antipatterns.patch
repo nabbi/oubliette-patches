@@ -28,10 +28,54 @@ index b1b5ec50f..950c94942 100644
  }
  
 diff --git a/scripts/zmaudit.pl.in b/scripts/zmaudit.pl.in
-index 2ad29a7a5..7a399e5ba 100644
+index 2ad29a7a5..f9d0feb5b 100644
 --- a/scripts/zmaudit.pl.in
 +++ b/scripts/zmaudit.pl.in
-@@ -710,8 +710,9 @@ if ( $level > 1 ) {
+@@ -175,6 +175,9 @@ MAIN: while( $loop ) {
+     } # end if
+   } # end while can't connect to the db
+ 
++  # Clear Object cache from previous cycle to bound memory in continuous mode
++  ZoneMinder::Object::init_cache();
++
+   my @Storage_Areas;
+   my @all_Storage_Areas = ZoneMinder::Storage->find();
+ 
+@@ -335,6 +338,10 @@ MAIN: while( $loop ) {
+ 									$Event->save();
+ 								}
+ 							}
++							# Free cached directory listings — no longer needed after SaveJPEGs check
++							delete $$Event{files};
++							delete $$Event{capture_jpegs};
++							delete $$Event{analyse_jpegs};
+ 
+             } # event path exists
+           } # end foreach event_link
+@@ -383,6 +390,10 @@ MAIN: while( $loop ) {
+ 							$Event->SaveJPEGs(
+ 								( $Event->has_capture_jpegs() ? 1 : 0 ) | ( $Event->has_analyse_jpegs() ? 2 : 0 )
+ 									);
++							# Free cached directory listings — no longer needed after SaveJPEGs check
++							delete $$Event{files};
++							delete $$Event{capture_jpegs};
++							delete $$Event{analyse_jpegs};
+               if ( ! $event_ids_by_path{$event_dir} ) {
+                 Warning("No event link found at ".$Event->LinkPath() ." for " . $Event->to_string());
+               }
+@@ -652,6 +663,11 @@ EVENT: while ( my ( $db_event, $age ) = each( %$db_events ) ) {
+     redo MAIN;
+   }
+ 
++  # Free event data structures — cross-referencing is complete and the
++  # orphan detection / summary queries below use their own SQL.
++  undef $fs_monitors;
++  undef $db_monitors;
++
+ if ( $level > 1 ) {
+ # Remove orphaned events (with no monitor)
+ # Shouldn't be possible anymore with FOREIGN KEYS in place
+@@ -710,8 +726,9 @@ if ( $level > 1 ) {
  # Remove orphaned frame records
    $cleaned = 0;
    Debug('Checking for Orphaned Frames');
@@ -43,7 +87,7 @@ index 2ad29a7a5..7a399e5ba 100644
    my $selectOrphanedFramesSth = $dbh->prepare_cached( $selectOrphanedFramesSql )
      or Fatal("Can't prepare '$selectOrphanedFramesSql': ".$dbh->errstr());
    $res = $selectOrphanedFramesSth->execute()
-@@ -730,8 +731,9 @@ if ( $level > 1 ) {
+@@ -730,8 +747,9 @@ if ( $level > 1 ) {
  # Remove orphaned stats records
    $cleaned = 0;
    Debug('Checking for Orphaned Stats');
@@ -55,7 +99,7 @@ index 2ad29a7a5..7a399e5ba 100644
    my $selectOrphanedStatsSth = $dbh->prepare_cached( $selectOrphanedStatsSql )
      or Fatal("Can't prepare '$selectOrphanedStatsSql': ".$dbh->errstr());
    $res = $selectOrphanedStatsSth->execute()
-@@ -872,28 +874,35 @@ FROM `Frames` WHERE `EventId`=?';
+@@ -872,28 +890,35 @@ FROM `Frames` WHERE `EventId`=?';
        if ( $Config{ZM_LOG_DATABASE_LIMIT} =~ /^(.*)s$/ ) {
          $Config{ZM_LOG_DATABASE_LIMIT} = $1;
        }
@@ -103,7 +147,7 @@ index 2ad29a7a5..7a399e5ba 100644
    ';
  
    ZoneMinder::Database::zmDbDo($eventcounts_sql);
-@@ -944,7 +953,10 @@ FROM `Frames` WHERE `EventId`=?';
+@@ -944,7 +969,10 @@ FROM `Frames` WHERE `EventId`=?';
    ZoneMinder::Database::zmDbDo($eventcounts_month_sql);
    aud_print("Finished updating MonthEvents");
  
@@ -115,7 +159,7 @@ index 2ad29a7a5..7a399e5ba 100644
    aud_print("Finished updating Storage DiskSpace");
  
    sleep($Config{ZM_AUDIT_CHECK_INTERVAL}) if $continuous;
-@@ -1063,7 +1075,8 @@ sub delete_empty_directories {
+@@ -1063,7 +1091,8 @@ sub delete_empty_directories {
    } 
  } # end sub delete_empty_directories
  
@@ -125,7 +169,7 @@ index 2ad29a7a5..7a399e5ba 100644
  sub time_of_youngest_file {
    my $dir = shift;
  
-@@ -1071,17 +1084,8 @@ sub time_of_youngest_file {
+@@ -1071,17 +1100,8 @@ sub time_of_youngest_file {
      Error("Can't open directory '$dir': $!");
      return;
    }
