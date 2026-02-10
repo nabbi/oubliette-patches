@@ -1,71 +1,34 @@
-commit 64c25bbab7f0aafc219f2318b84c418c81cbf8b7
-Author: Nic Boet <nic@boet.cc>
-Date:   Mon Feb 9 21:34:14 2026 -0600
-
-    perf: replace costly SQL anti-patterns in zmaudit.pl with efficient joins
-    
-    zmaudit runs every ZM_AUDIT_CHECK_INTERVAL (default 900s). Several of its
-    queries used correlated subqueries, NOT IN, or per-row counting that forced
-    MySQL into row-by-row execution. The efficient patterns (LEFT JOIN anti-join,
-    GROUP BY + INNER JOIN) were already used elsewhere in the same file
-    (lines 660, 684 for anti-joins; lines 902-944 for aggregation). These queries
-    were simply never updated to match.
-    
-    Changes:
-    
-    1. Orphaned Frames detection — highest impact
-       Replaced: SELECT DISTINCT EventId FROM Frames
-                 WHERE (SELECT COUNT(*) FROM Events WHERE Events.Id=EventId)=0
-       With:     LEFT JOIN Events ... WHERE e.Id IS NULL
-       The Frames table is the largest in ZoneMinder (1-10M+ rows). The old
-       correlated subquery (DEPENDENT SUBQUERY in EXPLAIN) evaluated one inner
-       lookup per Frames row. The LEFT JOIN lets MySQL use a single anti-join
-       scan. Estimated 10-40x speedup on typical installations.
-    
-    2. Orphaned Stats detection
-       Replaced: NOT IN (SELECT Id FROM Events)
-       With:     LEFT JOIN Events ... WHERE e.Id IS NULL
-       NOT IN materializes the full Events ID list then checks each Stats row
-       against it. LEFT JOIN enables the same anti-join optimization as #1.
-       Estimated 5-20x speedup.
-    
-    3. Event_Summaries total/archived counts
-       Replaced: 4 correlated subqueries (each scanning Events per monitor)
-       With:     Single GROUP BY computing all 4 aggregates in one pass,
-                 INNER JOIN to update. Identical pattern to the Hour/Day/Week/Month
-                 rollups already at lines 902-944. Reduces 40 index scans (10
-                 monitors × 4 subqueries) to 1 table scan. Estimated 10-40x.
-       Note: INNER JOIN means monitors with zero events keep stale values,
-       matching the existing Hour/Day/Week/Month behavior. Self-corrects when
-       new events arrive.
-    
-    4. Log deletion batch size
-       Increased LIMIT from 10 to 1000 rows per iteration, moved prepare_cached
-       outside the loop, added early termination (< 1000 returned = done),
-       suppressed "0 rows" message. Reduces 10,000 iterations to 100 for 100K
-       expired rows. Precedent: zmstats.pl.in uses LIMIT 100 with the same
-       early-termination pattern ($rows == 100). We use 1000 because zmaudit
-       runs every 900s (vs zmstats' 30s), so larger batches are appropriate.
-       Estimated ~100x speedup for this operation.
-    
-    5. Storage DiskSpace update — lowest impact
-       Replaced correlated subquery with INNER JOIN + GROUP BY for consistency.
-       Storage table is tiny (1-5 rows) so absolute gain is marginal.
-    
-    Combined estimated improvement per audit cycle:
-      Before: 26-183s (2M Frames, 200K Events baseline)
-      After:  2-13s
-      Larger installations (10M+ Frames) see proportionally greater gains since
-      the orphaned Frames query alone could take minutes.
-    
-    Behavioral equivalence: all queries produce identical result sets. The only
-    observable difference is the Log deletion no longer prints "Deleted 0 log
-    table entries by time" on the final iteration.
-    
-    Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>
-
+diff --git a/scripts/ZoneMinder/lib/ZoneMinder/Event.pm b/scripts/ZoneMinder/lib/ZoneMinder/Event.pm
+index b1b5ec50f..950c94942 100644
+--- a/scripts/ZoneMinder/lib/ZoneMinder/Event.pm
++++ b/scripts/ZoneMinder/lib/ZoneMinder/Event.pm
+@@ -575,14 +575,20 @@ sub check_for_in_filesystem {
+   my $path = $_[0]->Path();
+   if ( $path ) {
+     if ( -e $path ) {
+-      my @files = glob "$path/*";
+-      Debug("Checking for files for event $_[0]{Id} at $path using glob $path/* found " . scalar @files . ' files');
+-      return 1 if @files;
++      if ( opendir(my $dh, $path) ) {
++        while ( my $entry = readdir($dh) ) {
++          next if $entry eq '.' or $entry eq '..';
++          closedir($dh);
++          Debug("Checking for files for event $_[0]{Id} at $path found files");
++          return 1;
++        }
++        closedir($dh);
++      }
+     } else {
+       Warning("Path not found for Event $_[0]{Id} at $path");
+     }
+   }
+-  Debug("Checking for files for event $_[0]{Id} at $path using glob $path/* found no files");
++  Debug("Checking for files for event $_[0]{Id} at $path found no files");
+   return 0;
+ }
+ 
 diff --git a/scripts/zmaudit.pl.in b/scripts/zmaudit.pl.in
-index 2ad29a7a5..254e52f75 100644
+index 2ad29a7a5..7a399e5ba 100644
 --- a/scripts/zmaudit.pl.in
 +++ b/scripts/zmaudit.pl.in
 @@ -710,8 +710,9 @@ if ( $level > 1 ) {
@@ -152,3 +115,33 @@ index 2ad29a7a5..254e52f75 100644
    aud_print("Finished updating Storage DiskSpace");
  
    sleep($Config{ZM_AUDIT_CHECK_INTERVAL}) if $continuous;
+@@ -1063,7 +1075,8 @@ sub delete_empty_directories {
+   } 
+ } # end sub delete_empty_directories
+ 
+-# The idea is that the youngest file in the event directory gives us the event starttime
++# Returns the mtime of the event directory, used to derive StartDateTime
++# for Medium scheme events.
+ sub time_of_youngest_file {
+   my $dir = shift;
+ 
+@@ -1071,17 +1084,8 @@ sub time_of_youngest_file {
+     Error("Can't open directory '$dir': $!");
+     return;
+   }
+-  my $youngest = (stat($dir))[9];
+-  Debug("stat of dir $dir is $youngest");
+-  foreach my $file ( readdir( DIR ) ) {
+-    next if $file =~ /^\./;
+-    $_ = (stat($dir))[9];
+-    if ($_ and ($_ < $youngest)) {
+-      $youngest = $_;
+-      Debug("Found younger file $file at $youngest");
+-    }
+-  }
+-  return $youngest;
++  closedir(DIR);
++  return (stat($dir))[9];
+ } # end sub time_of_youngest_file
+ 
+ 1;
