@@ -1,35 +1,35 @@
-commit c1bd72d9b8d6b89d27b39472bf363a1cb4ceaa49
+commit 5393c626c531ad873437e5c5f7be0507a542c50d
 Author: Nic Boet <nic@boet.cc>
-Date:   Mon Feb 9 18:22:19 2026 -0600
+Date:   Mon Feb 9 18:42:44 2026 -0600
 
-    fix: apply saved montage rate to streams on page load
+    fix: preserve maxfps when MonitorStream.start() rebuilds stream URL
     
-    The montage view restores the Rate dropdown value from the
-    zmMontageRate cookie on page load, but never sends the rate
-    to the running streams. Streams always start at the camera's
-    native capture rate regardless of the displayed dropdown value.
-    The user must toggle the dropdown to a different value and back
-    to actually apply the saved rate.
+    start() reconstructs the zms URL from url_to_zms, which only contains
+    the monitor id. Parameters like auth, connkey, scale, and mode are
+    carried over, but maxfps was dropped. This causes streams to start at
+    the camera's native capture rate even when PHP rendered the initial
+    <img src> with a maxfps value (e.g. from the montage Rate cookie).
     
-    Call monitorsSetRate() with the dropdown's current value at the
-    end of startMonitors() so streams respect the persisted setting
-    immediately.
+    Carry over maxfps from the existing src the same way the other
+    parameters are preserved.
     
     Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>
 
-diff --git a/web/skins/classic/views/js/montage.js b/web/skins/classic/views/js/montage.js
-index f14349f62..e6b4191d1 100644
---- a/web/skins/classic/views/js/montage.js
-+++ b/web/skins/classic/views/js/montage.js
-@@ -490,6 +490,11 @@ function startMonitors() {
-     }
-     monitor.setup_onclick(handleClick);
-   }
-+  // Apply saved rate from dropdown (restored from cookie by PHP)
-+  const savedRate = $j('#changeRate').val();
-+  if (savedRate) {
-+    monitorsSetRate(savedRate);
-+  }
- }
- 
- function stopMonitors() { //Not working yet.
+diff --git a/web/js/MonitorStream.js b/web/js/MonitorStream.js
+index 4338b6ce2..053fd77cc 100644
+--- a/web/js/MonitorStream.js
++++ b/web/js/MonitorStream.js
+@@ -590,6 +590,13 @@ function MonitorStream(monitorData) {
+       if (-1 == src.search('mode=')) {
+         src += '&mode=jpeg';
+       }
++      // Preserve maxfps from the PHP-rendered src if present
++      if (-1 == src.search('maxfps=')) {
++        const match = stream.src.match(/maxfps=([^&]+)/);
++        if (match) {
++          src += '&maxfps='+match[1];
++        }
++      }
+       if (stream.src != src) {
+         //console.log("Setting src.src", stream.src, src);
+         stream.src = '';
