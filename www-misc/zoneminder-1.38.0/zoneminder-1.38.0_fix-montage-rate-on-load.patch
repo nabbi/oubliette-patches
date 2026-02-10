@@ -1,0 +1,35 @@
+commit c1bd72d9b8d6b89d27b39472bf363a1cb4ceaa49
+Author: Nic Boet <nic@boet.cc>
+Date:   Mon Feb 9 18:22:19 2026 -0600
+
+    fix: apply saved montage rate to streams on page load
+    
+    The montage view restores the Rate dropdown value from the
+    zmMontageRate cookie on page load, but never sends the rate
+    to the running streams. Streams always start at the camera's
+    native capture rate regardless of the displayed dropdown value.
+    The user must toggle the dropdown to a different value and back
+    to actually apply the saved rate.
+    
+    Call monitorsSetRate() with the dropdown's current value at the
+    end of startMonitors() so streams respect the persisted setting
+    immediately.
+    
+    Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>
+
+diff --git a/web/skins/classic/views/js/montage.js b/web/skins/classic/views/js/montage.js
+index f14349f62..e6b4191d1 100644
+--- a/web/skins/classic/views/js/montage.js
++++ b/web/skins/classic/views/js/montage.js
+@@ -490,6 +490,11 @@ function startMonitors() {
+     }
+     monitor.setup_onclick(handleClick);
+   }
++  // Apply saved rate from dropdown (restored from cookie by PHP)
++  const savedRate = $j('#changeRate').val();
++  if (savedRate) {
++    monitorsSetRate(savedRate);
++  }
+ }
+ 
+ function stopMonitors() { //Not working yet.
