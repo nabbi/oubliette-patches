@@ -1,0 +1,34 @@
+commit f77ca859ed91e28dd85abdd850a00383b9b0c162
+Author: Nic Boet <nic@boet.cc>
+Date:   Mon Feb 9 23:14:55 2026 -0600
+
+    perf: skip FFmpeg video probe for JPEG-based event streams
+    
+    When SaveJPEGs is enabled, sendFrame() reads JPEG files directly from
+    disk and never touches the FFmpeg input. However, loadEventData()
+    unconditionally called FFmpeg_Input::Open() on the event video file,
+    which runs avformat_find_stream_info() — a 2-5 second probe that was
+    pure overhead for JPEG-based streaming.
+    
+    Gate the Open() call on !(SaveJPEGs & 1) so the expensive probe is
+    only performed when frame extraction from the video container is
+    actually needed.
+    
+    Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>
+
+diff --git a/src/zm_eventstream.cpp b/src/zm_eventstream.cpp
+index 411f67136..fb9ecb890 100644
+--- a/src/zm_eventstream.cpp
++++ b/src/zm_eventstream.cpp
+@@ -391,7 +391,10 @@ bool EventStream::loadEventData(uint64_t event_id) {
+   }
+   mysql_free_result(result);
+ 
+-  if (!event_data->video_file.empty()) {
++  // Only open FFmpeg input when JPEG frames are not available on disk.
++  // avformat_find_stream_info() probes several seconds of video and costs 2-5s,
++  // which is wasted when sendFrame() reads JPEG files directly.
++  if (!event_data->video_file.empty() && !(event_data->SaveJPEGs & 1)) {
+     std::string filepath = event_data->path + "/" + event_data->video_file;
+     Debug(1, "Loading video file from %s", filepath.c_str());
+     delete ffmpeg_input;
