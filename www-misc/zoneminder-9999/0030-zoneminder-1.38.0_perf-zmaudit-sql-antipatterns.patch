@@ -28,7 +28,7 @@ index b1b5ec50f..950c94942 100644
  }
  
 diff --git a/scripts/zmaudit.pl.in b/scripts/zmaudit.pl.in
-index 2ad29a7a5..f9d0feb5b 100644
+index 2ad29a7a5..33b15dbf9 100644
 --- a/scripts/zmaudit.pl.in
 +++ b/scripts/zmaudit.pl.in
 @@ -175,6 +175,9 @@ MAIN: while( $loop ) {
@@ -41,18 +41,129 @@ index 2ad29a7a5..f9d0feb5b 100644
    my @Storage_Areas;
    my @all_Storage_Areas = ZoneMinder::Storage->find();
  
-@@ -335,6 +338,10 @@ MAIN: while( $loop ) {
- 									$Event->save();
- 								}
- 							}
-+							# Free cached directory listings — no longer needed after SaveJPEGs check
-+							delete $$Event{files};
-+							delete $$Event{capture_jpegs};
-+							delete $$Event{analyse_jpegs};
+@@ -210,6 +213,11 @@ MAIN: while( $loop ) {
+   my $eventSelectSth = $dbh->prepare_cached( $eventSelectSql )
+     or Fatal( "Can't prepare '$eventSelectSql': ".$dbh->errstr() );
+ 
++  # Lightweight event check — avoids SELECT * and Object cache for the common case
++  my $eventCheckSql = 'SELECT `StorageId`, `SaveJPEGs` FROM `Events` WHERE `Id`=?';
++  my $eventCheckSth = $dbh->prepare_cached( $eventCheckSql )
++    or Fatal( "Can't prepare '$eventCheckSql': ".$dbh->errstr() );
++
+   $cleaned = 0;
+   my $res = $monitorSelectSth->execute( $monitor_id ? $monitor_id : () )
+     or Fatal( "Can't execute: $monitorSelectSql ".$monitorSelectSth->errstr() );
+@@ -294,47 +302,69 @@ MAIN: while( $loop ) {
+             } else {
+               $event_ids_by_path{$event_path} = $event_id;
+ 
+-              my $Event = $fs_events->{$event_id} = ZoneMinder::Event->find_one(Id=>$event_id);
+-							if ( ! $Event ) {
+-								$Event = $fs_events->{$event_id} = new ZoneMinder::Event();
+-								$$Event{Id} = $event_id;
+-								$$Event{Path} = join('/', $Storage->Path(), $day_dir, $event_path);
+-								$$Event{RelativePath} = join('/', $day_dir, $event_path);
+-								$$Event{Scheme} = 'Deep';
+-								$Event->MonitorId( $monitor_dir );
+-								$Event->StorageId( $Storage->Id() );
+-								$Event->DiskSpace( undef );
+-							} else {
+-								my $full_path = join('/', $Storage->Path(), $day_dir, $event_path);
++              # Lightweight check: does event exist with correct StorageId and SaveJPEGs?
++              my $full_path = join('/', $Storage->Path(), $day_dir, $event_path);
++              $eventCheckSth->execute($event_id);
++              my $db_row = $eventCheckSth->fetchrow_hashref();
++
++              if ($db_row
++                  and ($db_row->{StorageId} // 0) == $Storage->Id()
++                  and $db_row->{SaveJPEGs}) {
++                # Common case: create lightweight Event — no SELECT *, no Object cache
++                my $Event = $fs_events->{$event_id} = new ZoneMinder::Event();
++                $$Event{Id} = $event_id;
++                $$Event{Path} = $full_path;
++                $$Event{RelativePath} = join('/', $day_dir, $event_path);
++                $$Event{Scheme} = 'Deep';
++                $$Event{_db_verified} = 1;
++                $Event->MonitorId( $monitor_dir );
++                $Event->StorageId( $Storage->Id() );
++              } else {
++                # Event missing from DB or needs correction — load full object
++                my $Event = $fs_events->{$event_id} = ZoneMinder::Event->find_one(Id=>$event_id);
++                if ( ! $Event ) {
++                  $Event = $fs_events->{$event_id} = new ZoneMinder::Event();
++                  $$Event{Id} = $event_id;
++                  $$Event{Path} = $full_path;
++                  $$Event{RelativePath} = join('/', $day_dir, $event_path);
++                  $$Event{Scheme} = 'Deep';
++                  $Event->MonitorId( $monitor_dir );
++                  $Event->StorageId( $Storage->Id() );
++                  $Event->DiskSpace( undef );
++                } else {
+ # Check storage id
+-								if ( $Storage->Id() and !$Event->Storage()->Id() ) {
+-									Info("Correcting StorageId for event $$Event{Id} from $$Event{StorageId} $$Event{Path} to $$Storage{Id} $full_path");
+-									$Event->save({ StorageId=>$Storage->Id() });
+-									$Event->Path(undef);
+-								} else {
+-
+-									if ( $Event->Path() ne $full_path ) {
+-										if ( ! (-e $Event->Path()) ) {
+-											if ( $Event->StorageId() != $Storage->Id() ) {
+-												Info("Correcting Storage Id for event $$Event{Id} from $$Event{StorageId} $$Event{Path} to $$Storage{Id} $full_path");
+-												$Event->save({ StorageId=>$Storage->Id() });
+-												$Event->Path(undef);
+-											}
+-										} else {
+-											Info("Not updating path to event due to it existing at both $$Event{Path} and $event_path");
+-										}
+-									} # end if change of storage id
+-								} # end if valid storage id
+-							} # end if event found
+-
+-							if ( ! $Event->SaveJPEGs() ) {
+-								if ( $Event->SaveJPEGs(
+-										( $Event->has_capture_jpegs() ? 1 : 0 ) | ( $Event->has_analyse_jpegs() ? 2 : 0 )
+-										) ) {
+-									Info("Updated Event $$Event{Id} SaveJPEGs to " . $Event->SaveJPEGs());
+-									$Event->save();
+-								}
+-							}
++                  if ( $Storage->Id() and !$Event->Storage()->Id() ) {
++                    Info("Correcting StorageId for event $$Event{Id} from $$Event{StorageId} $$Event{Path} to $$Storage{Id} $full_path");
++                    $Event->save({ StorageId=>$Storage->Id() });
++                    $Event->Path(undef);
++                  } else {
++                    if ( $Event->Path() ne $full_path ) {
++                      if ( ! (-e $Event->Path()) ) {
++                        if ( $Event->StorageId() != $Storage->Id() ) {
++                          Info("Correcting Storage Id for event $$Event{Id} from $$Event{StorageId} $$Event{Path} to $$Storage{Id} $full_path");
++                          $Event->save({ StorageId=>$Storage->Id() });
++                          $Event->Path(undef);
++                        }
++                      } else {
++                        Info("Not updating path to event due to it existing at both $$Event{Path} and $event_path");
++                      }
++                    } # end if change of storage id
++                  } # end if valid storage id
++
++                  if ( ! $Event->SaveJPEGs() ) {
++                    if ( $Event->SaveJPEGs(
++                            ( $Event->has_capture_jpegs() ? 1 : 0 ) | ( $Event->has_analyse_jpegs() ? 2 : 0 )
++                            ) ) {
++                      Info("Updated Event $$Event{Id} SaveJPEGs to " . $Event->SaveJPEGs());
++                      $Event->save();
++                    }
++                  }
++                  # Free cached directory listings
++                  delete $$Event{files};
++                  delete $$Event{capture_jpegs};
++                  delete $$Event{analyse_jpegs};
++                } # end if event found in DB
++              } # end if common case vs needs correction
  
              } # event path exists
            } # end foreach event_link
-@@ -383,6 +390,10 @@ MAIN: while( $loop ) {
+@@ -383,6 +413,10 @@ MAIN: while( $loop ) {
  							$Event->SaveJPEGs(
  								( $Event->has_capture_jpegs() ? 1 : 0 ) | ( $Event->has_analyse_jpegs() ? 2 : 0 )
  									);
@@ -63,7 +174,76 @@ index 2ad29a7a5..f9d0feb5b 100644
                if ( ! $event_ids_by_path{$event_dir} ) {
                  Warning("No event link found at ".$Event->LinkPath() ." for " . $Event->to_string());
                }
-@@ -652,6 +663,11 @@ EVENT: while ( my ( $db_event, $age ) = each( %$db_events ) ) {
+@@ -491,8 +525,9 @@ MAIN: while( $loop ) {
+ 
+           if ( ! defined( $db_events->{$fs_event_id} ) ) {
+             # Long running zmaudits can find events that were created after we loaded all db events.
+-            # So do a secondary lookup
+-            if ( ZoneMinder::Event->find_one(Id=>$fs_event_id) ) {
++            # So do a secondary lookup (lightweight — avoids full SELECT * and Object cache)
++            $eventCheckSth->execute($fs_event_id);
++            if ( $eventCheckSth->fetchrow_arrayref() ) {
+               Debug("$$Event{Id} found in secondary lookup.");
+               next;
+             }
+@@ -622,28 +657,35 @@ EVENT: while ( my ( $db_event, $age ) = each( %$db_events ) ) {
+           }
+         } # end if exists in filesystem
+       } else {
+-        Debug("Found fs event for id $db_event, $age seconds old at " . $$fs_events{$db_event}->Path());
+-        my $Event = ZoneMinder::Event->find_one( Id=>$db_event );
+-        if ( $Event and ! $Event->check_for_in_filesystem() ) {
+-          Warning('Not found at ' . $Event->Path() . ' was found at ' . $$fs_events{$db_event}->Path());
+-          Warning($Event->to_string());
+-          Warning($$fs_events{$db_event}->to_string());
+-          $$Event{Scheme} = '' if ! defined $$Event{Scheme};
+-          if ( $$fs_events{$db_event}->Scheme() ne $Event->Scheme() ) {
+-            Info("Updating scheme on event $$Event{Id} from $$Event{Scheme} to $$fs_events{$db_event}{Scheme}");
+-            $Event->Scheme($$fs_events{$db_event}->Scheme());
+-          } 
+-          if ( $$fs_events{$db_event}->StorageId() != $Event->StorageId() ) {
+-            Info("Updating storage area on event $$Event{Id} from $$Event{StorageId} to $$fs_events{$db_event}{StorageId}");
+-            $Event->StorageId($$fs_events{$db_event}->StorageId());
+-          }
+-          if ( ! $Event->StartDateTime() ) {
+-            Info("Updating StartDateTime on event $$Event{Id} from $$Event{StartDateTime} to $$fs_events{$db_event}{StartDateTime}");
+-            $Event->StartDateTime($$fs_events{$db_event}->StartDateTime());
+-          }
++        # Event found in both DB and FS
++        if ( $$fs_events{$db_event}{_db_verified} ) {
++          # StorageId and Path already verified during FS scan — skip redundant DB lookup
++          Debug("Event $db_event verified during FS scan at " . $$fs_events{$db_event}->Path());
++        } else {
++          # Unverified event (Medium/Shallow or correction needed) — load from DB to check
++          Debug("Found fs event for id $db_event, $age seconds old at " . $$fs_events{$db_event}->Path());
++          my $Event = ZoneMinder::Event->find_one( Id=>$db_event );
++          if ( $Event and ! $Event->check_for_in_filesystem() ) {
++            Warning('Not found at ' . $Event->Path() . ' was found at ' . $$fs_events{$db_event}->Path());
++            Warning($Event->to_string());
++            Warning($$fs_events{$db_event}->to_string());
++            $$Event{Scheme} = '' if ! defined $$Event{Scheme};
++            if ( $$fs_events{$db_event}->Scheme() ne $Event->Scheme() ) {
++              Info("Updating scheme on event $$Event{Id} from $$Event{Scheme} to $$fs_events{$db_event}{Scheme}");
++              $Event->Scheme($$fs_events{$db_event}->Scheme());
++            }
++            if ( $$fs_events{$db_event}->StorageId() != $Event->StorageId() ) {
++              Info("Updating storage area on event $$Event{Id} from $$Event{StorageId} to $$fs_events{$db_event}{StorageId}");
++              $Event->StorageId($$fs_events{$db_event}->StorageId());
++            }
++            if ( ! $Event->StartDateTime() ) {
++              Info("Updating StartDateTime on event $$Event{Id} from $$Event{StartDateTime} to $$fs_events{$db_event}{StartDateTime}");
++              $Event->StartDateTime($$fs_events{$db_event}->StartDateTime());
++            }
+ 
+-          $Event->save();
+-        } # end if Event exists in db and not in filesystem
++            $Event->save();
++          } # end if Event exists in db and not in filesystem
++        } # end if _db_verified
+       } # end if ! in fs_events
+     } # foreach db_event
+   } # end foreach db_monitor
+@@ -652,6 +694,11 @@ EVENT: while ( my ( $db_event, $age ) = each( %$db_events ) ) {
      redo MAIN;
    }
  
@@ -75,7 +255,7 @@ index 2ad29a7a5..f9d0feb5b 100644
  if ( $level > 1 ) {
  # Remove orphaned events (with no monitor)
  # Shouldn't be possible anymore with FOREIGN KEYS in place
-@@ -710,8 +726,9 @@ if ( $level > 1 ) {
+@@ -710,8 +757,9 @@ if ( $level > 1 ) {
  # Remove orphaned frame records
    $cleaned = 0;
    Debug('Checking for Orphaned Frames');
@@ -87,7 +267,7 @@ index 2ad29a7a5..f9d0feb5b 100644
    my $selectOrphanedFramesSth = $dbh->prepare_cached( $selectOrphanedFramesSql )
      or Fatal("Can't prepare '$selectOrphanedFramesSql': ".$dbh->errstr());
    $res = $selectOrphanedFramesSth->execute()
-@@ -730,8 +747,9 @@ if ( $level > 1 ) {
+@@ -730,8 +778,9 @@ if ( $level > 1 ) {
  # Remove orphaned stats records
    $cleaned = 0;
    Debug('Checking for Orphaned Stats');
@@ -99,7 +279,7 @@ index 2ad29a7a5..f9d0feb5b 100644
    my $selectOrphanedStatsSth = $dbh->prepare_cached( $selectOrphanedStatsSql )
      or Fatal("Can't prepare '$selectOrphanedStatsSql': ".$dbh->errstr());
    $res = $selectOrphanedStatsSth->execute()
-@@ -872,28 +890,35 @@ FROM `Frames` WHERE `EventId`=?';
+@@ -872,28 +921,35 @@ FROM `Frames` WHERE `EventId`=?';
        if ( $Config{ZM_LOG_DATABASE_LIMIT} =~ /^(.*)s$/ ) {
          $Config{ZM_LOG_DATABASE_LIMIT} = $1;
        }
@@ -147,7 +327,7 @@ index 2ad29a7a5..f9d0feb5b 100644
    ';
  
    ZoneMinder::Database::zmDbDo($eventcounts_sql);
-@@ -944,7 +969,10 @@ FROM `Frames` WHERE `EventId`=?';
+@@ -944,7 +1000,10 @@ FROM `Frames` WHERE `EventId`=?';
    ZoneMinder::Database::zmDbDo($eventcounts_month_sql);
    aud_print("Finished updating MonthEvents");
  
@@ -159,7 +339,7 @@ index 2ad29a7a5..f9d0feb5b 100644
    aud_print("Finished updating Storage DiskSpace");
  
    sleep($Config{ZM_AUDIT_CHECK_INTERVAL}) if $continuous;
-@@ -1063,7 +1091,8 @@ sub delete_empty_directories {
+@@ -1063,7 +1122,8 @@ sub delete_empty_directories {
    } 
  } # end sub delete_empty_directories
  
@@ -169,7 +349,7 @@ index 2ad29a7a5..f9d0feb5b 100644
  sub time_of_youngest_file {
    my $dir = shift;
  
-@@ -1071,17 +1100,8 @@ sub time_of_youngest_file {
+@@ -1071,17 +1131,8 @@ sub time_of_youngest_file {
      Error("Can't open directory '$dir': $!");
      return;
    }
