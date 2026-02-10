@@ -1,0 +1,48 @@
+commit 5fde4e5debd5d775bcd89deb627005a2801d069a
+Author: Nic Boet <nic@boet.cc>
+Date:   Mon Feb 9 19:25:58 2026 -0600
+
+    perf: reuse diff image buffer in Zone::CheckAlarms
+    
+    Replace delete/new Image cycle with lazy-alloc + Assign(). When the
+    buffer already exists (every frame after the first), Assign() detects
+    matching dimensions and does a plain memcpy into the existing
+    allocation, eliminating an aligned malloc+free of ~2 MB per zone per
+    analyzed frame.
+    
+    With 4 zones at 15 fps this removes 60 alloc/free cycles per second
+    from the analysis hot path. The HighlightEdges code path (analysis
+    images) still allocates a new Image and deletes the old diff buffer,
+    which is correct — the next Assign() will reallocate once to restore
+    the single-channel format, then resume reuse.
+    
+    Behaviorally equivalent: Zone dimensions are constant during zone
+    lifetime, the destructor already handles cleanup via delete image,
+    and the only external consumer (Monitor::Analyse → AlarmImage →
+    Overlay) reads the image without storing pointers.
+    
+    Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>
+
+diff --git a/src/zm_zone.cpp b/src/zm_zone.cpp
+index d07afcdc7..3aec13122 100644
+--- a/src/zm_zone.cpp
++++ b/src/zm_zone.cpp
+@@ -201,10 +201,14 @@ bool Zone::CheckAlarms(const Image *delta_image) {
+     return false;
+   }
+ 
+-  if (image)
+-    delete image;
+-  // Get the difference image
+-  Image *diff_image = image = new Image(*delta_image);
++  // Reuse diff image buffer — dimensions are constant per zone, so Assign()
++  // just does a memcpy into the existing allocation instead of free+malloc.
++  if (!image) {
++    image = new Image(*delta_image);
++  } else {
++    image->Assign(*delta_image);
++  }
++  Image *diff_image = image;
+   int diff_width = diff_image->Width();
+   uint8_t* diff_buff = diff_image->Buffer();
+   uint8_t* pdiff;

@@ -1,0 +1,132 @@
+commit a4409f328beef078279c2cd53425750d06603144
+Author: Nic Boet <nic@boet.cc>
+Date:   Mon Feb 9 19:32:39 2026 -0600
+
+    perf: reduce per-frame overhead in EventStream::sendFrame
+    
+    Three changes to the JPEG streaming hot path:
+    
+    1. Reuse Image buffer for JPEG decode: add Image member reuse_image_
+       to EventStream. On the JPEG path (SaveJPEGs & 1), call ReadJpeg()
+       into the member instead of new/delete Image each frame. ReadJpeg's
+       internal WriteBuffer() reuses the pixel allocation when dimensions
+       match (every frame in a given event). Eliminates ~2 MB malloc+free
+       per streamed frame. The FFmpeg path (MP4-only events) still uses
+       new/delete since its initialization is more complex and it's the
+       uncommon case.
+    
+    2. Replace stat() with access() for file existence checks. The stat()
+       filled a struct stat that was never read — send_file() does its own
+       fstat() for Content-Length. access(path, R_OK) is a lighter syscall
+       that skips the 144-byte struct fill.
+    
+    3. Replace stringtf() with snprintf() into a stack char[PATH_MAX].
+       stringtf() does two heap allocations per call (unique_ptr<char[]>
+       for vsnprintf + std::string for return). File paths are well within
+       PATH_MAX. This eliminates 2-6 heap alloc/free cycles per frame
+       depending on the analysis fallback path.
+    
+    Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>
+
+diff --git a/src/zm_eventstream.cpp b/src/zm_eventstream.cpp
+index 411f67136..9c96af806 100644
+--- a/src/zm_eventstream.cpp
++++ b/src/zm_eventstream.cpp
+@@ -27,7 +27,9 @@
+ #include "zm_storage.h"
+ #include <algorithm>
+ #include <arpa/inet.h>
++#include <climits>
+ #include <sys/stat.h>
++#include <unistd.h>
+ 
+ #include <filesystem>
+ 
+@@ -851,30 +853,29 @@ bool EventStream::sendFrame(Microseconds delta_us) {
+     curr_frame_id = std::clamp(curr_frame_id, 1, (int)event_data->frames.size());
+   }
+ 
+-  std::string filepath;
+-  struct stat filestat = {};
++  char filepath_buf[PATH_MAX] = "";
+ 
+   // This needs to be abstracted.  If we are saving jpgs, then load the capture file.
+   // If we are only saving analysis frames, then send that.
+   if ((frame_type == FRAME_ANALYSIS) && (event_data->SaveJPEGs & 2)) {
+-    filepath = stringtf(staticConfig.analyse_file_format.c_str(), event_data->path.c_str(), curr_frame_id);
+-    if (stat(filepath.c_str(), &filestat) < 0) {
+-      Debug(1, "analyze file %s not found will try to stream from other", filepath.c_str());
+-      filepath = stringtf(staticConfig.capture_file_format.c_str(), event_data->path.c_str(), curr_frame_id);
+-      if (stat(filepath.c_str(), &filestat) < 0) {
+-        Debug(1, "capture file %s not found either", filepath.c_str());
+-        filepath = "";
++    snprintf(filepath_buf, sizeof(filepath_buf), staticConfig.analyse_file_format.c_str(), event_data->path.c_str(), curr_frame_id);
++    if (access(filepath_buf, R_OK) != 0) {
++      Debug(1, "analyze file %s not found will try to stream from other", filepath_buf);
++      snprintf(filepath_buf, sizeof(filepath_buf), staticConfig.capture_file_format.c_str(), event_data->path.c_str(), curr_frame_id);
++      if (access(filepath_buf, R_OK) != 0) {
++        Debug(1, "capture file %s not found either", filepath_buf);
++        filepath_buf[0] = '\0';
+       }
+     }
+   } else if (event_data->SaveJPEGs & 1) {
+-    filepath = stringtf(staticConfig.capture_file_format.c_str(), event_data->path.c_str(), curr_frame_id);
++    snprintf(filepath_buf, sizeof(filepath_buf), staticConfig.capture_file_format.c_str(), event_data->path.c_str(), curr_frame_id);
+   } else if (!ffmpeg_input) {
+     Fatal("JPEGS not saved. zms is not capable of streaming jpegs from mp4 yet");
+     return false;
+   }
+ 
+   if ( type == STREAM_MPEG ) {
+-    Image image(filepath.c_str());
++    Image image(filepath_buf);
+ 
+     Image *send_image = prepareImage(&image);
+ 
+@@ -889,19 +890,20 @@ bool EventStream::sendFrame(Microseconds delta_us) {
+                             config.mpeg_timed_frames,
+                             delta_us.count() * 1000);
+   } else {
+-    bool send_raw = (type == STREAM_JPEG) && ((scale >= ZM_SCALE_BASE) && (zoom == ZM_SCALE_BASE)) && !filepath.empty();
++    bool send_raw = (type == STREAM_JPEG) && ((scale >= ZM_SCALE_BASE) && (zoom == ZM_SCALE_BASE)) && filepath_buf[0] != '\0';
+ 
+     if (send_raw) {
+       fprintf(stdout, "--" BOUNDARY "\r\n");
+-      if (!send_file(filepath)) {
+-        Error("Can't send %s: %s", filepath.c_str(), strerror(errno));
++      if (!send_file(filepath_buf)) {
++        Error("Can't send %s: %s", filepath_buf, strerror(errno));
+         return false;
+       }
+     } else {
+       Image *image = nullptr;
+ 
+-      if (!filepath.empty()) {
+-        image = new Image(filepath.c_str());
++      if (filepath_buf[0] != '\0') {
++        reuse_image_.ReadJpeg(filepath_buf, ZM_COLOUR_RGB24, ZM_SUBPIX_ORDER_RGB);
++        image = &reuse_image_;
+       } else if (ffmpeg_input) {
+         // Get the frame from the mp4 input
+         const FrameData *frame_data = &event_data->frames[curr_frame_id-1];
+@@ -977,7 +979,7 @@ bool EventStream::sendFrame(Microseconds delta_us) {
+         break;
+       }
+       int rc = send_buffer(img_buffer, img_buffer_size);
+-      delete image;
++      if (image != &reuse_image_) delete image;
+       image = nullptr;
+       if (!rc) return false;
+     }  // end if send_raw or not
+diff --git a/src/zm_eventstream.h b/src/zm_eventstream.h
+index 599e97f2e..8329857ee 100644
+--- a/src/zm_eventstream.h
++++ b/src/zm_eventstream.h
+@@ -127,6 +127,7 @@ class EventStream : public StreamBase {
+   bool send_buffer(uint8_t * buffer, int size);
+   Storage *storage;
+   FFmpeg_Input  *ffmpeg_input;
++  Image reuse_image_;  // reused across sendFrame calls to avoid per-frame heap alloc
+ };
+ 
+ #endif // ZM_EVENTSTREAM_H
