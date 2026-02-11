@@ -1,4 +1,4 @@
-commit a4409f328beef078279c2cd53425750d06603144
+commit c8d5ea32345cba5fc0ab303a2fd101c86a7489d3
 Author: Nic Boet <nic@boet.cc>
 Date:   Mon Feb 9 19:32:39 2026 -0600
 
@@ -20,35 +20,44 @@ Date:   Mon Feb 9 19:32:39 2026 -0600
        fstat() for Content-Length. access(path, R_OK) is a lighter syscall
        that skips the 144-byte struct fill.
     
-    3. Replace stringtf() with snprintf() into a stack char[PATH_MAX].
+    3. Replace stringtf() with snprintf() into a stack char[PATH_MAX],
+       wrapped in a std::string_view for downstream consumers.
        stringtf() does two heap allocations per call (unique_ptr<char[]>
        for vsnprintf + std::string for return). File paths are well within
-       PATH_MAX. This eliminates 2-6 heap alloc/free cycles per frame
-       depending on the analysis fallback path.
+       PATH_MAX. snprintf() into the stack buffer eliminates 2-6 heap
+       alloc/free cycles per frame depending on the analysis fallback
+       path. The string_view keeps the C-style storage contained to the
+       snprintf call sites; everything downstream uses C++ semantics
+       (filepath.empty(), filepath.data()) rather than raw char[] idioms.
     
     Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>
 
 diff --git a/src/zm_eventstream.cpp b/src/zm_eventstream.cpp
-index 411f67136..9c96af806 100644
+index 411f67136..782f04479 100644
 --- a/src/zm_eventstream.cpp
 +++ b/src/zm_eventstream.cpp
-@@ -27,7 +27,9 @@
+@@ -27,7 +27,10 @@
  #include "zm_storage.h"
  #include <algorithm>
  #include <arpa/inet.h>
 +#include <climits>
++#include <string_view>
  #include <sys/stat.h>
 +#include <unistd.h>
  
  #include <filesystem>
  
-@@ -851,30 +853,29 @@ bool EventStream::sendFrame(Microseconds delta_us) {
+@@ -851,30 +854,35 @@ bool EventStream::sendFrame(Microseconds delta_us) {
      curr_frame_id = std::clamp(curr_frame_id, 1, (int)event_data->frames.size());
    }
  
 -  std::string filepath;
 -  struct stat filestat = {};
++  // Stack buffer + string_view avoids the per-frame heap allocations that
++  // stringtf() would incur (2 allocs per call).  All consumers need const char*
++  // anyway (access, ReadJpeg, Image ctor, Debug/Error format args).
 +  char filepath_buf[PATH_MAX] = "";
++  std::string_view filepath;  // non-owning view into filepath_buf
  
    // This needs to be abstracted.  If we are saving jpgs, then load the capture file.
    // If we are only saving analysis frames, then send that.
@@ -69,9 +78,11 @@ index 411f67136..9c96af806 100644
 +        filepath_buf[0] = '\0';
        }
      }
++    filepath = filepath_buf;
    } else if (event_data->SaveJPEGs & 1) {
 -    filepath = stringtf(staticConfig.capture_file_format.c_str(), event_data->path.c_str(), curr_frame_id);
 +    snprintf(filepath_buf, sizeof(filepath_buf), staticConfig.capture_file_format.c_str(), event_data->path.c_str(), curr_frame_id);
++    filepath = filepath_buf;
    } else if (!ffmpeg_input) {
      Fatal("JPEGS not saved. zms is not capable of streaming jpegs from mp4 yet");
      return false;
@@ -79,37 +90,32 @@ index 411f67136..9c96af806 100644
  
    if ( type == STREAM_MPEG ) {
 -    Image image(filepath.c_str());
-+    Image image(filepath_buf);
++    Image image(filepath.data());
  
      Image *send_image = prepareImage(&image);
  
-@@ -889,19 +890,20 @@ bool EventStream::sendFrame(Microseconds delta_us) {
-                             config.mpeg_timed_frames,
-                             delta_us.count() * 1000);
-   } else {
--    bool send_raw = (type == STREAM_JPEG) && ((scale >= ZM_SCALE_BASE) && (zoom == ZM_SCALE_BASE)) && !filepath.empty();
-+    bool send_raw = (type == STREAM_JPEG) && ((scale >= ZM_SCALE_BASE) && (zoom == ZM_SCALE_BASE)) && filepath_buf[0] != '\0';
+@@ -893,15 +901,17 @@ bool EventStream::sendFrame(Microseconds delta_us) {
  
      if (send_raw) {
        fprintf(stdout, "--" BOUNDARY "\r\n");
 -      if (!send_file(filepath)) {
 -        Error("Can't send %s: %s", filepath.c_str(), strerror(errno));
++      // send_file takes const std::string&; implicit conversion from filepath_buf
 +      if (!send_file(filepath_buf)) {
-+        Error("Can't send %s: %s", filepath_buf, strerror(errno));
++        Error("Can't send %s: %s", filepath.data(), strerror(errno));
          return false;
        }
      } else {
        Image *image = nullptr;
  
--      if (!filepath.empty()) {
+       if (!filepath.empty()) {
 -        image = new Image(filepath.c_str());
-+      if (filepath_buf[0] != '\0') {
-+        reuse_image_.ReadJpeg(filepath_buf, ZM_COLOUR_RGB24, ZM_SUBPIX_ORDER_RGB);
++        reuse_image_.ReadJpeg(filepath.data(), ZM_COLOUR_RGB24, ZM_SUBPIX_ORDER_RGB);
 +        image = &reuse_image_;
        } else if (ffmpeg_input) {
          // Get the frame from the mp4 input
          const FrameData *frame_data = &event_data->frames[curr_frame_id-1];
-@@ -977,7 +979,7 @@ bool EventStream::sendFrame(Microseconds delta_us) {
+@@ -977,7 +987,7 @@ bool EventStream::sendFrame(Microseconds delta_us) {
          break;
        }
        int rc = send_buffer(img_buffer, img_buffer_size);
