@@ -25,7 +25,7 @@ index 5f45b5d..3c937e7 100644
  *.d
  config.mk
 diff --git a/src/main.c b/src/main.c
-index e4cb32e..49ba51e 100644
+index e4cb32e..c577a37 100644
 --- a/src/main.c
 +++ b/src/main.c
 @@ -175,18 +175,118 @@ static void setBacklightBrightness(float value) {
@@ -35,7 +35,7 @@ index e4cb32e..49ba51e 100644
 +/*
 + * Poll for Expose/VisibilityNotify events from one of our background
 + * windows, confirming the GPU has actually rendered the content.
-+ * Waits up to 100 ms with 1 ms sleep intervals.  Returns true if a
++ * Waits up to 500 ms with 10 ms sleep intervals.  Returns true if a
 + * paint event was seen, false on timeout.
 + */
 +static bool waitForPaint(Display *display, const Window *bgwins,
@@ -44,7 +44,7 @@ index e4cb32e..49ba51e 100644
 +    unsigned long start = alock_mtime();
 +    XEvent ev;
 +
-+    while (alock_mtime() - start < 100) {
++    while (alock_mtime() - start < 500) {
 +
 +        while (XCheckMaskEvent(display, mask, &ev)) {
 +
@@ -63,7 +63,7 @@ index e4cb32e..49ba51e 100644
 +                    return true;
 +                }
 +        }
-+        usleep(1000);
++        usleep(10000);
 +    }
 +
 +    XSync(display, False);
