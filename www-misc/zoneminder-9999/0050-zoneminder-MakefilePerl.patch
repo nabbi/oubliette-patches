@@ -42,7 +42,7 @@ index a4986e661..5924b57b2 100644
  scripts/zm
  scripts/zmaudit.pl
 diff --git a/CMakeLists.txt b/CMakeLists.txt
-index 3fdea6da3..dc69209c0 100644
+index 085d429cb..cbc91d1bc 100644
 --- a/CMakeLists.txt
 +++ b/CMakeLists.txt
 @@ -89,7 +89,7 @@ mark_as_advanced(
@@ -91,24 +91,30 @@ index 3fdea6da3..dc69209c0 100644
  endif()
  
  # Required for certain checks to work
-@@ -643,13 +632,32 @@ if(NOT PERL_FOUND)
+@@ -642,13 +631,38 @@ if(NOT PERL_FOUND)
    message(FATAL_ERROR "ZoneMinder requires Perl 5.6.0 or newer but it was not found on your system")
  endif()
  
 +# Detect Perl module installation path
-+if(ZM_TARGET_DISTRO STREQUAL "FreeBSD")
-+  set(_perl_config_key "sitelib")
-+else()
-+  set(_perl_config_key "vendorlib")
-+endif()
++# Prefer vendorlib (standard for distro packages), fall back to sitelib
++# (used on FreeBSD and systems without vendorlib configured)
 +execute_process(
-+  COMMAND ${PERL_EXECUTABLE} -MConfig -e "print \$Config{${_perl_config_key}}"
++  COMMAND ${PERL_EXECUTABLE} -MConfig -e "print \$Config{vendorlib}"
 +  OUTPUT_VARIABLE _perl_lib_default
 +  OUTPUT_STRIP_TRAILING_WHITESPACE
 +  RESULT_VARIABLE _perl_result)
 +if(NOT _perl_result EQUAL 0 OR _perl_lib_default STREQUAL "")
-+  message(FATAL_ERROR "Could not detect Perl ${_perl_config_key} path. "
-+    "Set ZM_PERL_INSTALL_PATH manually.")
++  execute_process(
++    COMMAND ${PERL_EXECUTABLE} -MConfig -e "print \$Config{sitelib}"
++    OUTPUT_VARIABLE _perl_lib_default
++    OUTPUT_STRIP_TRAILING_WHITESPACE
++    RESULT_VARIABLE _perl_result)
++  if(NOT _perl_result EQUAL 0 OR _perl_lib_default STREQUAL "")
++    message(FATAL_ERROR
++      "Could not detect Perl vendorlib or sitelib path. "
++      "Set ZM_PERL_INSTALL_PATH manually.")
++  endif()
++  message(STATUS "Perl vendorlib not configured, using sitelib")
 +endif()
 +set(ZM_PERL_INSTALL_PATH "${_perl_lib_default}" CACHE PATH
 +  "Install path for ZoneMinder Perl modules. Override for non-standard locations (also set ZM_PERL_SEARCH_PATH).")
@@ -125,6 +131,13 @@ index 3fdea6da3..dc69209c0 100644
  if(NOT PERLMODULES_FOUND)
    message(WARNING "Not all required perl modules were found on your system")
  endif()
+diff --git a/distros/beowulf/libzoneminder-perl.install b/distros/beowulf/libzoneminder-perl.install
+index 67191d9cf..e27abaf5a 100644
+--- a/distros/beowulf/libzoneminder-perl.install
++++ b/distros/beowulf/libzoneminder-perl.install
+@@ -1,2 +1 @@
+-usr/share/man/man3
+ usr/share/perl5
 diff --git a/distros/redhat/zoneminder.spec b/distros/redhat/zoneminder.spec
 index 690b5ecbd..28efa3f37 100644
 --- a/distros/redhat/zoneminder.spec
@@ -137,8 +150,15 @@ index 690b5ecbd..28efa3f37 100644
  BuildRequires: perl(LWP::UserAgent)
  BuildRequires: perl(MIME::Entity)
  BuildRequires: perl(MIME::Lite)
+diff --git a/distros/ubuntu2004/libzoneminder-perl.install b/distros/ubuntu2004/libzoneminder-perl.install
+index 67191d9cf..e27abaf5a 100644
+--- a/distros/ubuntu2004/libzoneminder-perl.install
++++ b/distros/ubuntu2004/libzoneminder-perl.install
+@@ -1,2 +1 @@
+-usr/share/man/man3
+ usr/share/perl5
 diff --git a/onvif/modules/CMakeLists.txt b/onvif/modules/CMakeLists.txt
-index 502970af9..87bc74c26 100644
+index 7d2101ae9..87bc74c26 100644
 --- a/onvif/modules/CMakeLists.txt
 +++ b/onvif/modules/CMakeLists.txt
 @@ -1,18 +1,5 @@
@@ -153,7 +173,7 @@ index 502970af9..87bc74c26 100644
 -# MAKEMAKER_NOECHO_COMMAND previously defined in /scripts/zoneminder/CMakeLists.txt
 -
 -# Add build target for the perl modules
--add_custom_target(zmonvifmodules ALL perl Makefile.PL ${ZM_PERL_MM_PARMS_FULL} FIRST_MAKEFILE=MakefilePerl DESTDIR="${CMAKE_CURRENT_BINARY_DIR}/output" ${MAKEMAKER_NOECHO_COMMAND} COMMAND make -f MakefilePerl pure_install COMMENT "Building ZoneMinder perl ONVIF proxy module")
+-add_custom_target(zmonvifmodules ALL "${PERL_EXECUTABLE}" Makefile.PL ${ZM_PERL_MM_PARMS_FULL} FIRST_MAKEFILE=MakefilePerl DESTDIR="${CMAKE_CURRENT_BINARY_DIR}/output" ${MAKEMAKER_NOECHO_COMMAND} COMMAND make -f MakefilePerl pure_install COMMENT "Building ZoneMinder perl ONVIF proxy module")
 -
 -# Add install target for the perl modules
 -install(DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/output/" DESTINATION "/")
@@ -183,7 +203,7 @@ index b6565f149..000000000
 -       AUTHOR         => 'Jan Hochstein') : ()),
 -);
 diff --git a/onvif/proxy/CMakeLists.txt b/onvif/proxy/CMakeLists.txt
-index 779b4d47e..a93520abe 100644
+index 7b3779a9f..a93520abe 100644
 --- a/onvif/proxy/CMakeLists.txt
 +++ b/onvif/proxy/CMakeLists.txt
 @@ -1,18 +1,5 @@
@@ -198,7 +218,7 @@ index 779b4d47e..a93520abe 100644
 -# MAKEMAKER_NOECHO_COMMAND previously defined in /scripts/zoneminder/CMakeLists.txt
 -
 -# Add build target for the perl modules
--add_custom_target(zmonvifproxy ALL perl Makefile.PL ${ZM_PERL_MM_PARMS_FULL} FIRST_MAKEFILE=MakefilePerl DESTDIR=${CMAKE_CURRENT_BINARY_DIR}/output ${MAKEMAKER_NOECHO_COMMAND} COMMAND make -f MakefilePerl pure_install COMMENT "Building ZoneMinder perl ONVIF proxy module")
+-add_custom_target(zmonvifproxy ALL "${PERL_EXECUTABLE}" Makefile.PL ${ZM_PERL_MM_PARMS_FULL} FIRST_MAKEFILE=MakefilePerl DESTDIR=${CMAKE_CURRENT_BINARY_DIR}/output ${MAKEMAKER_NOECHO_COMMAND} COMMAND make -f MakefilePerl pure_install COMMENT "Building ZoneMinder perl ONVIF proxy module")
 -
 -# Add install target for the perl modules
 -install(DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/output/" DESTINATION "/")
@@ -228,7 +248,7 @@ index b6565f149..000000000
 -       AUTHOR         => 'Jan Hochstein') : ()),
 -);
 diff --git a/scripts/ZoneMinder/CMakeLists.txt b/scripts/ZoneMinder/CMakeLists.txt
-index 2a8708d2f..0d6ee1c58 100644
+index a97756fa2..0d6ee1c58 100644
 --- a/scripts/ZoneMinder/CMakeLists.txt
 +++ b/scripts/ZoneMinder/CMakeLists.txt
 @@ -1,34 +1,86 @@
@@ -308,7 +328,7 @@ index 2a8708d2f..0d6ee1c58 100644
 +      string(REPLACE ".pm" "" _build_stem "${_pm_rel}")
  
 -# Add build target for the perl modules
--add_custom_target(zmperlmodules ALL perl Makefile.PL ${ZM_PERL_MM_PARMS_FULL} FIRST_MAKEFILE=MakefilePerl DESTDIR="${CMAKE_CURRENT_BINARY_DIR}/output" ${MAKEMAKER_NOECHO_COMMAND} COMMAND make -f MakefilePerl pure_install COMMENT "Building ZoneMinder perl modules")
+-add_custom_target(zmperlmodules ALL "${PERL_EXECUTABLE}" Makefile.PL ${ZM_PERL_MM_PARMS_FULL} FIRST_MAKEFILE=MakefilePerl DESTDIR="${CMAKE_CURRENT_BINARY_DIR}/output" ${MAKEMAKER_NOECHO_COMMAND} COMMAND make -f MakefilePerl pure_install COMMENT "Building ZoneMinder perl modules")
 +      # Memory.pm is generated by configure_file; others are static source files
 +      if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/lib/${_pm_rel}")
 +        set(_pm_src "${CMAKE_CURRENT_SOURCE_DIR}/lib/${_pm_rel}")
