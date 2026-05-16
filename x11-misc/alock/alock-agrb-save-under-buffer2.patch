@@ -1,39 +1,154 @@
 diff --git a/.gitignore b/.gitignore
-index 5f45b5d..3c937e7 100644
+index 5f45b5d..1333aab 100644
 --- a/.gitignore
 +++ b/.gitignore
-@@ -21,6 +21,7 @@
- *.i*86
- *.x86_64
- *.hex
-+/src/alock
- 
- # Autotools
- /autom4te.cache/
-@@ -34,6 +35,13 @@
- Makefile.in
- config.h.in
- *~
+@@ -38,3 +38,13 @@ config.h.in
+ *.d
+ config.mk
+ config.log
++
++# Build outputs
 +/Makefile
 +/config.h
 +/config.status
 +/stamp-h1
-+/doc/Makefile
-+/src/Makefile
-+/src/.deps/
- 
- *.d
- config.mk
++doc/Makefile
++src/Makefile
++src/.deps/
++src/alock
 diff --git a/src/main.c b/src/main.c
-index e4cb32e..56e8c10 100644
+index e4cb32e..79ee701 100644
 --- a/src/main.c
 +++ b/src/main.c
-@@ -317,6 +317,27 @@ static int lockDisplay(Display *display, struct aModules *modules) {
+@@ -16,7 +16,6 @@
+ #include <locale.h>
+ #include <signal.h>
+ #include <spawn.h>
+-#include <stdbool.h>
+ #include <stdlib.h>
+ #include <string.h>
+ #include <unistd.h>
+@@ -175,6 +174,40 @@ static void setBacklightBrightness(float value) {
+ }
+ #endif /* WITH_XBLIGHT */
+ 
++/* Waits up to timeout_ms for an Expose or VisibilityNotify from one of
++ * wins[].  Drains unrelated StructureNotify events to keep the queue
++ * clean.  Returns as soon as a matching event arrives. */
++static void waitForPaint(Display *display, Window *wins, int nwins,
++                         unsigned long timeout_ms) {
++
++    unsigned long start = alock_mtime();
++
++    while (alock_mtime() - start < timeout_ms) {
++
++        XEvent ev;
++
++        while (XCheckMaskEvent(display,
++                    ExposureMask | StructureNotifyMask | VisibilityChangeMask,
++                    &ev)) {
++
++            Window src = None;
++            if (ev.type == Expose)
++                src = ev.xexpose.window;
++            else if (ev.type == VisibilityNotify)
++                src = ev.xvisibility.window;
++            else
++                /* drain StructureNotify; not relevant to paint state */
++                continue;
++
++            for (int j = 0; j < nwins; j++)
++                if (wins[j] == src)
++                    return;
++        }
++
++        usleep(10000);
++    }
++}
++
+ /* Lock current display and grab pointer and keyboard. On successful
+  * lock this function returns 0, otherwise -1. */
+ static int lockDisplay(Display *display, struct aModules *modules) {
+@@ -221,65 +254,11 @@ static int lockDisplay(Display *display, struct aModules *modules) {
+      */
+     XSync(display, False);
+ 
+-    if (bgcount > 0) {
++    if (bgcount > 0)
++        waitForPaint(display, bgwins, bgcount, 500);
+ 
+-        unsigned long start = alock_mtime();
+-        bool painted = false;
+-
+-        /*
+-         * Upper bound to avoid blocking forever; X11 gives no guarantee that
+-         * expose or visibility events will ever arrive.
+-         */
+-        while (alock_mtime() - start < 500) {
+-
+-            XEvent ev;
+-
+-            /* Pump events; do not block hard forever */
+-            while (XCheckMaskEvent(display,
+-                        ExposureMask | StructureNotifyMask | VisibilityChangeMask,
+-                        &ev)) {
+-
+-                /* Only accept events from one of our background windows */
+-                Window src = None;
+-                if (ev.type == Expose)
+-                    src = ev.xexpose.window;
+-                else if (ev.type == VisibilityNotify)
+-                    src = ev.xvisibility.window;
+-                else
+-                    /*
+-                    * Intentionally drain non-paint-related events (e.g. StructureNotify)
+-                    * from the queue; they are not relevant to our painting check.
+-                    */
+-                    continue;
+-
+-                /*
+-                * Only treat paint-related events from our own background windows as
+-                * meaningful; X11 may deliver expose/visibility events for unrelated
+-                * windows (e.g. root or WM-managed windows).
+-                */
+-                for (int j = 0; j < bgcount; j++)
+-                    if (bgwins[j] == src) {
+-                        painted = true;
+-                        break;
+-                    }
+-
+-                if (painted)
+-                    break;
+-            }
+-
+-            if (painted)
+-                break;
+-
+-            /*
+-             * Yield briefly to let the server/compositor make progress without
+-             * busy-spinning while waiting for paint-related events.
+-             */
+-            usleep(10000);
+-        }
+-
+-        /* Final sync before cursor/grab */
+-        XSync(display, False);
+-    }
++    /* Final sync before cursor/grab */
++    XSync(display, False);
+ 
+     free(bgwins);
+ 
+@@ -317,6 +296,31 @@ static int lockDisplay(Display *display, struct aModules *modules) {
      return 0;
  }
  
++/* On resume from suspend, swap to a blank cursor, repaint all background
++ * windows, hold for 500 ms to allow the GPU scanout buffer to update, then
++ * restore the ARGB cursor.  The pointer grab is never released. */
 +static void refreshCursorAfterResume(Display *display, struct aModules *modules,
 +                                     Cursor blank_cursor, Cursor argb_cursor) {
++
 +    int nscreens = ScreenCount(display);
 +
 +    XChangeActivePointerGrab(display, 0, blank_cursor, CurrentTime);
@@ -56,7 +171,7 @@ index e4cb32e..56e8c10 100644
  static void eventLoop(Display *display, struct aModules *modules) {
  
      XEvent ev;
-@@ -326,10 +347,22 @@ static void eventLoop(Display *display, struct aModules *modules) {
+@@ -326,10 +330,21 @@ static void eventLoop(Display *display, struct aModules *modules) {
      unsigned int clen;
      unsigned int pass_pos = 0, pass_len = 0;
      unsigned long keypress_time = 0;
@@ -65,7 +180,6 @@ index e4cb32e..56e8c10 100644
      /* if possible do not page this address to the swap area */
      mlock(pass, sizeof(pass));
  
-+    /* blank cursor held during the post-resume repaint window */
 +    Cursor blank_cursor;
 +    {
 +        Window root = DefaultRootWindow(display);
@@ -79,7 +193,7 @@ index e4cb32e..56e8c10 100644
      debug("entering event main loop");
      for (;;) {
  
-@@ -343,6 +376,11 @@ static void eventLoop(Display *display, struct aModules *modules) {
+@@ -343,6 +358,11 @@ static void eventLoop(Display *display, struct aModules *modules) {
                      keypress_time = 0;
                  }
  
@@ -91,13 +205,13 @@ index e4cb32e..56e8c10 100644
                  /* wait a bit */
                  usleep(25000);
                  continue;
-@@ -356,8 +394,14 @@ static void eventLoop(Display *display, struct aModules *modules) {
+@@ -356,8 +376,14 @@ static void eventLoop(Display *display, struct aModules *modules) {
                  setBacklightBrightness(0);
  #endif /* WITH_XBLIGHT */
  
 -            /* block until any key press event arrives */
 -            XMaskEvent(display, KeyPressMask | StructureNotifyMask, &ev);
-+            /* Poll for events so resume can be detected via clock jump */
++            /* poll for events so resume can be detected via clock jump */
 +            while (XCheckMaskEvent(display, KeyPressMask | StructureNotifyMask, &ev) == False) {
 +                unsigned long now = alock_mtime();
 +                if (now - last_time > 500)
@@ -108,7 +222,7 @@ index e4cb32e..56e8c10 100644
  
  #if WITH_XBLIGHT
              /* restore original backlight brightness value */
-@@ -366,6 +410,8 @@ static void eventLoop(Display *display, struct aModules *modules) {
+@@ -366,6 +392,8 @@ static void eventLoop(Display *display, struct aModules *modules) {
  #endif /* WITH_XBLIGHT */
          }
  
