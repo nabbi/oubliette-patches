@@ -24,8 +24,156 @@ index 5f45b5d..3c937e7 100644
  
  *.d
  config.mk
+diff --git a/src/alock.h b/src/alock.h
+index 5e358d8..1fef118 100644
+--- a/src/alock.h
++++ b/src/alock.h
+@@ -16,7 +16,9 @@
+ # include "config.h"
+ #endif
+ 
++#include <stdint.h>
+ #include <stdio.h>
++#include <stdlib.h>
+ #include <X11/Xlib.h>
+ #include <X11/Xresource.h>
+ 
+@@ -158,5 +160,11 @@ int alock_grayscale_image(XImage *image,
+         int x, int y,
+         unsigned int width,
+         unsigned int height);
++int alock_parse_rgb(Display *display,
++        const char *name,
++        uint8_t *r, uint8_t *g, uint8_t *b);
++void alock_flatten_argb(uint32_t *pixels, size_t count,
++        uint8_t bg_r, uint8_t bg_g, uint8_t bg_b,
++        int premultiplied);
+ 
+ #endif /* ALOCK_ALOCK_H_ */
+diff --git a/src/cursor_image.c b/src/cursor_image.c
+index 83f7041..6f62d37 100644
+--- a/src/cursor_image.c
++++ b/src/cursor_image.c
+@@ -30,6 +30,7 @@
+ static struct moduleData {
+     Display *display;
+     char *filename;
++    char *flatten;
+     Cursor cursor;
+ } data = { 0 };
+ 
+@@ -49,6 +50,10 @@ static void module_loadargs(const char *args) {
+             free(data.filename);
+             data.filename = strdup(&arg[5]);
+         }
++        else if (strstr(arg, "flatten=") == arg) {
++            free(data.flatten);
++            data.flatten = strdup(&arg[8]);
++        }
+     }
+ 
+     free(arguments);
+@@ -91,6 +96,23 @@ static int module_init(Display *dpy) {
+                 w = imlib_image_get_width();
+                 h = imlib_image_get_height();
+ 
++                /* Flatten ARGB against an opaque background so the
++                 * cursor has no transparent pixels. Eliminates the
++                 * save-under bleed-through of stale desktop content
++                 * on resume from suspend (NVIDIA proprietary in
++                 * particular). Use `flatten=no` to keep alpha. */
++                if (!data.flatten || strcmp(data.flatten, "no") != 0) {
++                    uint8_t br = 0, bg = 0, bb = 0;
++                    const char *bgname = data.flatten ? data.flatten : "black";
++                    if (!alock_parse_rgb(dpy, bgname, &br, &bg, &bb))
++                        fprintf(stderr, "[image]: unknown flatten color "
++                                "`%s`, using black\n", bgname);
++                    alock_flatten_argb(
++                            (uint32_t *)imlib_image_get_data(),
++                            (size_t)w * h, br, bg, bb, 0);
++                    imlib_image_put_back_data(imlib_image_get_data());
++                }
++
+                 { /* taken from cursor.c of libXcursor */
+                     GC gc = None;
+                     XImage ximage;
+@@ -178,6 +200,8 @@ static void module_free() {
+ 
+     free(data.filename);
+     data.filename = NULL;
++    free(data.flatten);
++    data.flatten = NULL;
+ }
+ 
+ static Cursor module_getcursor(void) {
+diff --git a/src/cursor_xcursor.c b/src/cursor_xcursor.c
+index 63e1ab5..a5061e3 100644
+--- a/src/cursor_xcursor.c
++++ b/src/cursor_xcursor.c
+@@ -22,6 +22,7 @@
+ static struct moduleData {
+     Display *display;
+     char *filename;
++    char *flatten;
+     Cursor cursor;
+ } data = { 0 };
+ 
+@@ -41,6 +42,10 @@ static void module_loadargs(const char *args) {
+             free(data.filename);
+             data.filename = strdup(&arg[5]);
+         }
++        else if (strstr(arg, "flatten=") == arg) {
++            free(data.flatten);
++            data.flatten = strdup(&arg[8]);
++        }
+     }
+ 
+     free(arguments);
+@@ -51,8 +56,31 @@ static int module_init(Display *dpy) {
+ 
+     data.display = dpy;
+ 
+-    if (data.filename)
+-        data.cursor = XcursorFilenameLoadCursor(dpy, data.filename);
++    if (data.filename) {
++        int size = XcursorGetDefaultSize(dpy);
++        XcursorImages *imgs = XcursorFilenameLoadImages(data.filename, size);
++        if (imgs) {
++            /* Flatten ARGB against an opaque background so the cursor
++             * has no transparent pixels. Eliminates save-under bleed-
++             * through of stale desktop content on resume from suspend
++             * (NVIDIA proprietary in particular). Use `flatten=no` to
++             * keep alpha. xcursor pixels are pre-multiplied. */
++            if (!data.flatten || strcmp(data.flatten, "no") != 0) {
++                uint8_t br = 0, bg = 0, bb = 0;
++                const char *bgname = data.flatten ? data.flatten : "black";
++                if (!alock_parse_rgb(dpy, bgname, &br, &bg, &bb))
++                    fprintf(stderr, "[xcursor]: unknown flatten color "
++                            "`%s`, using black\n", bgname);
++                for (int i = 0; i < imgs->nimage; i++) {
++                    XcursorImage *im = imgs->images[i];
++                    alock_flatten_argb((uint32_t *)im->pixels,
++                            (size_t)im->width * im->height, br, bg, bb, 1);
++                }
++            }
++            data.cursor = XcursorImagesLoadCursor(dpy, imgs);
++            XcursorImagesDestroy(imgs);
++        }
++    }
+ 
+     if (data.cursor == 0) {
+         fprintf(stderr, "[xcursor]: unable to load cursor file\n");
+@@ -69,6 +97,8 @@ static void module_free() {
+ 
+     free(data.filename);
+     data.filename = NULL;
++    free(data.flatten);
++    data.flatten = NULL;
+ }
+ 
+ static Cursor module_getcursor(void) {
 diff --git a/src/main.c b/src/main.c
-index e4cb32e..c577a37 100644
+index e4cb32e..edfc9ee 100644
 --- a/src/main.c
 +++ b/src/main.c
 @@ -175,18 +175,118 @@ static void setBacklightBrightness(float value) {
@@ -279,24 +427,41 @@ index e4cb32e..c577a37 100644
  
      XEvent ev;
      KeySym ks;
-@@ -359,6 +403,16 @@ static void eventLoop(Display *display, struct aModules *modules) {
-             /* block until any key press event arrives */
-             XMaskEvent(display, KeyPressMask | StructureNotifyMask, &ev);
+@@ -356,8 +400,31 @@ static void eventLoop(Display *display, struct aModules *modules) {
+                 setBacklightBrightness(0);
+ #endif /* WITH_XBLIGHT */
  
+-            /* block until any key press event arrives */
+-            XMaskEvent(display, KeyPressMask | StructureNotifyMask, &ev);
 +            /*
-+             * We just woke from idle.  After resume from system sleep the
-+             * GPU framebuffer may contain stale content.  Use the same
-+             * blank-cursor swap + repaint + waitForPaint sequence as the
-+             * initial lock to ensure clean save-under for the ARGB cursor.
++             * Poll for a key press while watching for suspend/resume.
++             * alock_mtime() is CLOCK_BOOTTIME so it advances during
++             * suspend; a sleep cycle of ~100 ms that observes a much
++             * larger jump indicates we just resumed.  Repaint backgrounds
++             * proactively at that moment, *before* the user types, so
++             * the first keystroke is not delayed by the paint-wait.
 +             */
-+            if (bgcount > 0)
-+                reinstallCursor(display, blank,
-+                        modules->cursor, bgwins, bgcount);
++            unsigned long last = alock_mtime();
++            int have_event;
++            for (;;) {
++                have_event = XCheckMaskEvent(display,
++                        KeyPressMask | StructureNotifyMask, &ev);
 +
++                unsigned long now = alock_mtime();
++                if (now - last > 500 && bgcount > 0)
++                    reinstallCursor(display, blank,
++                            modules->cursor, bgwins, bgcount);
++                last = now;
++
++                if (have_event)
++                    break;
++
++                usleep(100000);
++            }
+ 
  #if WITH_XBLIGHT
              /* restore original backlight brightness value */
-             if (modules->backlight != -1)
-@@ -493,12 +547,6 @@ static void eventLoop(Display *display, struct aModules *modules) {
+@@ -493,12 +560,6 @@ static void eventLoop(Display *display, struct aModules *modules) {
              debug("received configure notify event");
              break;
  
@@ -309,7 +474,7 @@ index e4cb32e..c577a37 100644
          }
      }
  }
-@@ -731,11 +779,15 @@ int main(int argc, char **argv) {
+@@ -731,11 +792,15 @@ int main(int argc, char **argv) {
  
      /* raise our background window and grab input, if this action has failed,
       * we are not able to lock the screen, then we're fucked... */
@@ -327,7 +492,7 @@ index e4cb32e..c577a37 100644
  
      retval = EXIT_SUCCESS;
      goto return_success;
-@@ -745,6 +797,9 @@ return_failure:
+@@ -745,6 +810,9 @@ return_failure:
  
  return_success:
  
@@ -337,3 +502,82 @@ index e4cb32e..c577a37 100644
      modules.auth->m.free();
      modules.cursor->m.free();
      modules.input->m.free();
+diff --git a/src/utils.c b/src/utils.c
+index 91aff58..e017dc1 100644
+--- a/src/utils.c
++++ b/src/utils.c
+@@ -316,6 +316,74 @@ int alock_grayscale_image(XImage *image,
+     return 1;
+ }
+ 
++/* Parse a color name (X11 named color or #rrggbb) into 8-bit RGB values
++ * without allocating a colormap entry. Returns 1 on success, 0 on
++ * failure (in which case r, g, and b are all set to 0). */
++int alock_parse_rgb(Display *display, const char *name,
++        uint8_t *r, uint8_t *g, uint8_t *b) {
++
++    *r = *g = *b = 0;
++
++    if (!display || !name)
++        return 0;
++
++    XColor c;
++    Colormap cmap = DefaultColormap(display, DefaultScreen(display));
++    if (XParseColor(display, cmap, name, &c) == 0)
++        return 0;
++
++    *r = c.red   >> 8;
++    *g = c.green >> 8;
++    *b = c.blue  >> 8;
++    return 1;
++}
++
++/* Composite ARGB pixel data against an opaque background color,
++ * producing fully-opaque pixels (alpha = 255) with the same visible
++ * appearance as the original pixels would have on that background.
++ *
++ * Pixel format: 0xAARRGGBB (alpha in bits 24-31, R in 16-23, G in 8-15,
++ * B in 0-7).  Set `premultiplied` to nonzero if the input RGB channels
++ * are already pre-multiplied by alpha (e.g. xcursor format); zero if
++ * the input is straight ARGB (e.g. imlib2 cursor data as currently
++ * used in alock).
++ *
++ * Eliminating non-255 alpha removes any save-under requirement when the
++ * cursor is composited by the X server, so stale framebuffer pixels
++ * cannot bleed through the cursor on resume from suspend. */
++void alock_flatten_argb(uint32_t *pixels, size_t count,
++        uint8_t bg_r, uint8_t bg_g, uint8_t bg_b,
++        int premultiplied) {
++
++    if (!pixels)
++        return;
++
++    for (size_t i = 0; i < count; i++) {
++        uint32_t px = pixels[i];
++        unsigned a = (px >> 24) & 0xff;
++        unsigned r = (px >> 16) & 0xff;
++        unsigned g = (px >>  8) & 0xff;
++        unsigned b = (px >>  0) & 0xff;
++        unsigned inv = 255 - a;
++
++        unsigned out_r, out_g, out_b;
++        if (premultiplied) {
++            out_r = r + (bg_r * inv + 127) / 255;
++            out_g = g + (bg_g * inv + 127) / 255;
++            out_b = b + (bg_b * inv + 127) / 255;
++        } else {
++            out_r = (r * a + bg_r * inv + 127) / 255;
++            out_g = (g * a + bg_g * inv + 127) / 255;
++            out_b = (b * a + bg_b * inv + 127) / 255;
++        }
++        if (out_r > 255) out_r = 255;
++        if (out_g > 255) out_g = 255;
++        if (out_b > 255) out_b = 255;
++
++        pixels[i] = (0xffu << 24) | (out_r << 16) | (out_g << 8) | out_b;
++    }
++}
++
+ /* Dummy function for module interface. */
+ void module_dummy_loadargs(const char *args) {
+     (void)args;
