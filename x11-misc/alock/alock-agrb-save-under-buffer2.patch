@@ -270,7 +270,7 @@ index 63e1ab5..2e5aa10 100644
 +    module_getimage,
  };
 diff --git a/src/main.c b/src/main.c
-index e4cb32e..9a1d730 100644
+index e4cb32e..9b27b3e 100644
 --- a/src/main.c
 +++ b/src/main.c
 @@ -28,6 +28,9 @@
@@ -283,7 +283,7 @@ index e4cb32e..9a1d730 100644
  
  
  extern char **environ;
-@@ -175,18 +178,315 @@ static void setBacklightBrightness(float value) {
+@@ -175,18 +178,331 @@ static void setBacklightBrightness(float value) {
  }
  #endif /* WITH_XBLIGHT */
  
@@ -487,6 +487,22 @@ index e4cb32e..9a1d730 100644
 +    sc->last_root_y = root_y;
 +}
 +
++/* Drain any further MotionNotify events queued behind `ev` and stamp the
++ * cursor only at the most recent position.  Avoids N redundant restore/
++ * save/composite cycles when motion events arrive in bursts (fast pointer
++ * movement, animation grace period, etc.). */
++static void swCursorMoveCoalesced(struct swCursor *sc, XEvent *ev) {
++    if (!sc) return;
++    int lx = ev->xmotion.x_root;
++    int ly = ev->xmotion.y_root;
++    XEvent more;
++    while (XCheckTypedEvent(sc->display, MotionNotify, &more)) {
++        lx = more.xmotion.x_root;
++        ly = more.xmotion.y_root;
++    }
++    swCursorMove(sc, lx, ly);
++}
++
 +/* After the bg window has been repainted (resume, screen-config change),
 + * scratch contains stale content for the wrong bg.  Drop it and re-stamp
 + * the cursor at its current position. */
@@ -601,7 +617,7 @@ index e4cb32e..9a1d730 100644
      if (bgwins == NULL) {
          fprintf(stderr, "alock: error window out of memory\n");
          return -1;
-@@ -215,93 +515,25 @@ static int lockDisplay(Display *display, struct aModules *modules) {
+@@ -215,93 +531,25 @@ static int lockDisplay(Display *display, struct aModules *modules) {
          XSelectInput(display, RootWindow(display, i), StructureNotifyMask);
      }
  
@@ -704,7 +720,7 @@ index e4cb32e..9a1d730 100644
      /* try to grab 2 times, another process (windowmanager) may have grabbed
       * the keyboard already */
      if (XGrabKeyboard(display, window, True, GrabModeAsync, GrabModeAsync,
-@@ -310,14 +542,64 @@ static int lockDisplay(Display *display, struct aModules *modules) {
+@@ -310,14 +558,64 @@ static int lockDisplay(Display *display, struct aModules *modules) {
          if (XGrabKeyboard(display, window, True, GrabModeAsync, GrabModeAsync,
                      CurrentTime) != GrabSuccess) {
              fprintf(stderr, "error: grab keyboard failed\n");
@@ -770,7 +786,7 @@ index e4cb32e..9a1d730 100644
  
      XEvent ev;
      KeySym ks;
-@@ -327,6 +609,12 @@ static void eventLoop(Display *display, struct aModules *modules) {
+@@ -327,6 +625,12 @@ static void eventLoop(Display *display, struct aModules *modules) {
      unsigned int pass_pos = 0, pass_len = 0;
      unsigned long keypress_time = 0;
  
@@ -783,7 +799,7 @@ index e4cb32e..9a1d730 100644
      /* if possible do not page this address to the swap area */
      mlock(pass, sizeof(pass));
  
-@@ -335,7 +623,7 @@ static void eventLoop(Display *display, struct aModules *modules) {
+@@ -335,7 +639,7 @@ static void eventLoop(Display *display, struct aModules *modules) {
  
          if (keypress_time) {
              /* check for any key press event (or root window state change) */
@@ -792,23 +808,30 @@ index e4cb32e..9a1d730 100644
  
                  /* user fell asleep while typing (5 seconds inactivity) */
                  if (alock_mtime() - keypress_time > 5000) {
-@@ -347,6 +635,15 @@ static void eventLoop(Display *display, struct aModules *modules) {
-                 usleep(25000);
+@@ -343,10 +647,20 @@ static void eventLoop(Display *display, struct aModules *modules) {
+                     keypress_time = 0;
+                 }
+ 
+-                /* wait a bit */
+-                usleep(25000);
++                /* Short sleep keeps the cursor overlay responsive to
++                 * mouse motion (~100 Hz) without busy-waiting. */
++                usleep(10000);
                  continue;
              }
 +#if ENABLE_XRENDER
 +            /* Dispatch motion events to the overlay without exiting
-+             * password-entry mode. */
++             * password-entry mode.  Coalesce queued motion events so
++             * fast pointer movement doesn't queue up redundant stamps. */
 +            if (sw_cursor && ev.type == MotionNotify) {
-+                swCursorMove(sw_cursor,
-+                        ev.xmotion.x_root, ev.xmotion.y_root);
++                swCursorMoveCoalesced(sw_cursor, &ev);
 +                continue;
 +            }
 +#endif
          }
          else {
  
-@@ -356,8 +653,44 @@ static void eventLoop(Display *display, struct aModules *modules) {
+@@ -356,8 +670,47 @@ static void eventLoop(Display *display, struct aModules *modules) {
                  setBacklightBrightness(0);
  #endif /* WITH_XBLIGHT */
  
@@ -817,10 +840,14 @@ index e4cb32e..9a1d730 100644
 +            /*
 +             * Poll for a key press while watching for suspend/resume.
 +             * alock_mtime() is CLOCK_BOOTTIME so it advances during
-+             * suspend; a sleep cycle of ~100 ms that observes a much
-+             * larger jump indicates we just resumed.  Repaint backgrounds
-+             * proactively at that moment, *before* the user types, so
-+             * the first keystroke is not delayed by the paint-wait.
++             * suspend; a sleep cycle that observes a much larger jump
++             * than the poll interval indicates we just resumed.  We
++             * repaint backgrounds proactively at that moment, *before*
++             * the user types, so the first keystroke is not delayed by
++             * the paint-wait.  A 10 ms poll keeps the cursor overlay
++             * smooth on pointer motion while the suspend threshold of
++             * 500 ms ensures normal hiccups (GC, scheduler) don't
++             * trigger spurious resume detection.
 +             */
 +            unsigned long last = alock_mtime();
 +            int have_event;
@@ -842,20 +869,19 @@ index e4cb32e..9a1d730 100644
 +                    /* Motion does not count as "user is back" — keep
 +                     * waiting for a key press but track the cursor. */
 +                    if (sw_cursor && ev.type == MotionNotify) {
-+                        swCursorMove(sw_cursor,
-+                                ev.xmotion.x_root, ev.xmotion.y_root);
++                        swCursorMoveCoalesced(sw_cursor, &ev);
 +                        continue;
 +                    }
 +#endif
 +                    break;
 +                }
 +
-+                usleep(100000);
++                usleep(10000);
 +            }
  
  #if WITH_XBLIGHT
              /* restore original backlight brightness value */
-@@ -493,9 +826,15 @@ static void eventLoop(Display *display, struct aModules *modules) {
+@@ -493,9 +846,14 @@ static void eventLoop(Display *display, struct aModules *modules) {
              debug("received configure notify event");
              break;
  
@@ -869,12 +895,11 @@ index e4cb32e..9a1d730 100644
 +             * outer dispatch (rare).  Track the position; don't change
 +             * input state. */
 +            if (sw_cursor)
-+                swCursorMove(sw_cursor,
-+                        ev.xmotion.x_root, ev.xmotion.y_root);
++                swCursorMoveCoalesced(sw_cursor, &ev);
              break;
  #endif
  
-@@ -731,11 +1070,26 @@ int main(int argc, char **argv) {
+@@ -731,11 +1089,26 @@ int main(int argc, char **argv) {
  
      /* raise our background window and grab input, if this action has failed,
       * we are not able to lock the screen, then we're fucked... */
@@ -903,7 +928,7 @@ index e4cb32e..9a1d730 100644
  
      retval = EXIT_SUCCESS;
      goto return_success;
-@@ -745,6 +1099,13 @@ return_failure:
+@@ -745,6 +1118,13 @@ return_failure:
  
  return_success:
  
