@@ -25,111 +25,196 @@ index 5f45b5d..3c937e7 100644
  *.d
  config.mk
 diff --git a/src/alock.h b/src/alock.h
-index 5e358d8..1fef118 100644
+index 5e358d8..8aef4c7 100644
 --- a/src/alock.h
 +++ b/src/alock.h
-@@ -16,7 +16,9 @@
+@@ -16,6 +16,7 @@
  # include "config.h"
  #endif
  
 +#include <stdint.h>
  #include <stdio.h>
-+#include <stdlib.h>
  #include <X11/Xlib.h>
  #include <X11/Xresource.h>
+@@ -57,9 +58,29 @@ struct aModuleBackground {
+     Window (*getwindow)(int screen);
+ };
  
-@@ -158,5 +160,11 @@ int alock_grayscale_image(XImage *image,
-         int x, int y,
-         unsigned int width,
-         unsigned int height);
-+int alock_parse_rgb(Display *display,
-+        const char *name,
-+        uint8_t *r, uint8_t *g, uint8_t *b);
-+void alock_flatten_argb(uint32_t *pixels, size_t count,
-+        uint8_t bg_r, uint8_t bg_g, uint8_t bg_b,
-+        int premultiplied);
++/* ARGB cursor image data exposed by cursor modules that load image
++ * cursors. Used by the software-cursor overlay so the cursor pixels
++ * can be composited onto the lock background window directly, instead
++ * of relying on the X server's cursor-sprite save-under (which leaks
++ * stale framebuffer content through ARGB transparency on NVIDIA).
++ *
++ * Layout: pixels[0..width*height) in 0xAARRGGBB form, pre-multiplied.
++ * The returned pointer is owned by the cursor module and remains valid
++ * until module_free(). */
++struct aCursorImage {
++    unsigned int width;
++    unsigned int height;
++    unsigned int xhot;
++    unsigned int yhot;
++    const uint32_t *pixels;
++};
++
+ struct aModuleCursor {
+     struct aModule m;
+     Cursor (*getcursor)(void);
++    /* Returns ARGB pixel data for software-overlay rendering, or NULL
++     * if this cursor type has no image form (font cursors, blank, none). */
++    const struct aCursorImage *(*getimage)(void);
+ };
  
- #endif /* ALOCK_ALOCK_H_ */
+ struct aModuleInput {
+diff --git a/src/cursor_blank.c b/src/cursor_blank.c
+index f7ccc6b..c98692d 100644
+--- a/src/cursor_blank.c
++++ b/src/cursor_blank.c
+@@ -54,6 +54,10 @@ static Cursor module_getcursor(void) {
+     return data.cursor;
+ }
+ 
++static const struct aCursorImage *module_getimage(void) {
++    return NULL;
++}
++
+ 
+ struct aModuleCursor alock_cursor_blank = {
+     { "blank",
+@@ -63,4 +67,5 @@ struct aModuleCursor alock_cursor_blank = {
+         module_free,
+     },
+     module_getcursor,
++    module_getimage,
+ };
+diff --git a/src/cursor_glyph.c b/src/cursor_glyph.c
+index 1df3f4f..2b835f2 100644
+--- a/src/cursor_glyph.c
++++ b/src/cursor_glyph.c
+@@ -230,6 +230,10 @@ static Cursor module_getcursor(void) {
+     return data.cursor;
+ }
+ 
++static const struct aCursorImage *module_getimage(void) {
++    return NULL;
++}
++
+ 
+ struct aModuleCursor alock_cursor_glyph = {
+     { "glyph",
+@@ -239,4 +243,5 @@ struct aModuleCursor alock_cursor_glyph = {
+         module_free,
+     },
+     module_getcursor,
++    module_getimage,
+ };
 diff --git a/src/cursor_image.c b/src/cursor_image.c
-index 83f7041..6f62d37 100644
+index 83f7041..3429585 100644
 --- a/src/cursor_image.c
 +++ b/src/cursor_image.c
-@@ -30,6 +30,7 @@
- static struct moduleData {
+@@ -31,6 +31,8 @@ static struct moduleData {
      Display *display;
      char *filename;
-+    char *flatten;
      Cursor cursor;
++    uint32_t *pixels;
++    struct aCursorImage image_view;
  } data = { 0 };
  
-@@ -49,6 +50,10 @@ static void module_loadargs(const char *args) {
-             free(data.filename);
-             data.filename = strdup(&arg[5]);
-         }
-+        else if (strstr(arg, "flatten=") == arg) {
-+            free(data.flatten);
-+            data.flatten = strdup(&arg[8]);
-+        }
-     }
  
-     free(arguments);
-@@ -91,6 +96,23 @@ static int module_init(Display *dpy) {
+@@ -91,6 +93,15 @@ static int module_init(Display *dpy) {
                  w = imlib_image_get_width();
                  h = imlib_image_get_height();
  
-+                /* Flatten ARGB against an opaque background so the
-+                 * cursor has no transparent pixels. Eliminates the
-+                 * save-under bleed-through of stale desktop content
-+                 * on resume from suspend (NVIDIA proprietary in
-+                 * particular). Use `flatten=no` to keep alpha. */
-+                if (!data.flatten || strcmp(data.flatten, "no") != 0) {
-+                    uint8_t br = 0, bg = 0, bb = 0;
-+                    const char *bgname = data.flatten ? data.flatten : "black";
-+                    if (!alock_parse_rgb(dpy, bgname, &br, &bg, &bb))
-+                        fprintf(stderr, "[image]: unknown flatten color "
-+                                "`%s`, using black\n", bgname);
-+                    alock_flatten_argb(
-+                            (uint32_t *)imlib_image_get_data(),
-+                            (size_t)w * h, br, bg, bb, 0);
-+                    imlib_image_put_back_data(imlib_image_get_data());
-+                }
++                /* Retain a copy of the ARGB pixel data so the
++                 * software-cursor overlay (see main.c) can composite
++                 * the cursor directly onto the lock background. */
++                size_t bytes = (size_t)w * h * 4;
++                data.pixels = malloc(bytes);
++                if (data.pixels)
++                    memcpy(data.pixels,
++                            imlib_image_get_data_for_reading_only(), bytes);
 +
                  { /* taken from cursor.c of libXcursor */
                      GC gc = None;
                      XImage ximage;
-@@ -178,6 +200,8 @@ static void module_free() {
- 
-     free(data.filename);
-     data.filename = NULL;
-+    free(data.flatten);
-+    data.flatten = NULL;
- }
- 
- static Cursor module_getcursor(void) {
-diff --git a/src/cursor_xcursor.c b/src/cursor_xcursor.c
-index 63e1ab5..a5061e3 100644
---- a/src/cursor_xcursor.c
-+++ b/src/cursor_xcursor.c
-@@ -22,6 +22,7 @@
- static struct moduleData {
-     Display *display;
-     char *filename;
-+    char *flatten;
-     Cursor cursor;
- } data = { 0 };
- 
-@@ -41,6 +42,10 @@ static void module_loadargs(const char *args) {
-             free(data.filename);
-             data.filename = strdup(&arg[5]);
+@@ -166,6 +177,14 @@ static int module_init(Display *dpy) {
          }
-+        else if (strstr(arg, "flatten=") == arg) {
-+            free(data.flatten);
-+            data.flatten = strdup(&arg[8]);
+ 
+         XFreePixmap(dpy, cursor_pm);
++
++        if (data.pixels) {
++            data.image_view.width = w;
++            data.image_view.height = h;
++            data.image_view.xhot = w / 2;
++            data.image_view.yhot = h / 2;
++            data.image_view.pixels = data.pixels;
 +        }
      }
  
-     free(arguments);
-@@ -51,8 +56,31 @@ static int module_init(Display *dpy) {
+     return 0;
+@@ -176,6 +195,10 @@ static void module_free() {
+     if (data.cursor)
+         XFreeCursor(data.display, data.cursor);
+ 
++    free(data.pixels);
++    data.pixels = NULL;
++    data.image_view.pixels = NULL;
++
+     free(data.filename);
+     data.filename = NULL;
+ }
+@@ -184,6 +207,10 @@ static Cursor module_getcursor(void) {
+     return data.cursor;
+ }
+ 
++static const struct aCursorImage *module_getimage(void) {
++    return data.image_view.pixels ? &data.image_view : NULL;
++}
++
+ 
+ struct aModuleCursor alock_cursor_image = {
+     { "image",
+@@ -193,4 +220,5 @@ struct aModuleCursor alock_cursor_image = {
+         module_free,
+     },
+     module_getcursor,
++    module_getimage,
+ };
+diff --git a/src/cursor_none.c b/src/cursor_none.c
+index 97c5990..8942d40 100644
+--- a/src/cursor_none.c
++++ b/src/cursor_none.c
+@@ -19,6 +19,10 @@ static Cursor module_getcursor(void) {
+     return None;
+ }
+ 
++static const struct aCursorImage *module_getimage(void) {
++    return NULL;
++}
++
+ 
+ struct aModuleCursor alock_cursor_none = {
+     { "none",
+@@ -28,4 +32,5 @@ struct aModuleCursor alock_cursor_none = {
+         module_dummy_free,
+     },
+     module_getcursor,
++    module_getimage,
+ };
+diff --git a/src/cursor_xcursor.c b/src/cursor_xcursor.c
+index 63e1ab5..2e5aa10 100644
+--- a/src/cursor_xcursor.c
++++ b/src/cursor_xcursor.c
+@@ -23,6 +23,8 @@ static struct moduleData {
+     Display *display;
+     char *filename;
+     Cursor cursor;
++    XcursorImages *images;
++    struct aCursorImage image_view;
+ } data = { 0 };
+ 
+ 
+@@ -51,8 +53,22 @@ static int module_init(Display *dpy) {
  
      data.display = dpy;
  
@@ -137,46 +222,68 @@ index 63e1ab5..a5061e3 100644
 -        data.cursor = XcursorFilenameLoadCursor(dpy, data.filename);
 +    if (data.filename) {
 +        int size = XcursorGetDefaultSize(dpy);
-+        XcursorImages *imgs = XcursorFilenameLoadImages(data.filename, size);
-+        if (imgs) {
-+            /* Flatten ARGB against an opaque background so the cursor
-+             * has no transparent pixels. Eliminates save-under bleed-
-+             * through of stale desktop content on resume from suspend
-+             * (NVIDIA proprietary in particular). Use `flatten=no` to
-+             * keep alpha. xcursor pixels are pre-multiplied. */
-+            if (!data.flatten || strcmp(data.flatten, "no") != 0) {
-+                uint8_t br = 0, bg = 0, bb = 0;
-+                const char *bgname = data.flatten ? data.flatten : "black";
-+                if (!alock_parse_rgb(dpy, bgname, &br, &bg, &bb))
-+                    fprintf(stderr, "[xcursor]: unknown flatten color "
-+                            "`%s`, using black\n", bgname);
-+                for (int i = 0; i < imgs->nimage; i++) {
-+                    XcursorImage *im = imgs->images[i];
-+                    alock_flatten_argb((uint32_t *)im->pixels,
-+                            (size_t)im->width * im->height, br, bg, bb, 1);
-+                }
-+            }
-+            data.cursor = XcursorImagesLoadCursor(dpy, imgs);
-+            XcursorImagesDestroy(imgs);
++        /* Load via XcursorFilenameLoadImages so we can both create the
++         * X cursor and retain the pixel data for software-overlay
++         * rendering (see sw_cursor in main.c). */
++        data.images = XcursorFilenameLoadImages(data.filename, size);
++        if (data.images && data.images->nimage > 0) {
++            data.cursor = XcursorImagesLoadCursor(dpy, data.images);
++            XcursorImage *im = data.images->images[0];
++            data.image_view.width = im->width;
++            data.image_view.height = im->height;
++            data.image_view.xhot = im->xhot;
++            data.image_view.yhot = im->yhot;
++            data.image_view.pixels = (const uint32_t *)im->pixels;
 +        }
 +    }
  
      if (data.cursor == 0) {
          fprintf(stderr, "[xcursor]: unable to load cursor file\n");
-@@ -69,6 +97,8 @@ static void module_free() {
+@@ -67,6 +83,12 @@ static void module_free() {
+     if (data.cursor)
+         XFreeCursor(data.display, data.cursor);
  
++    if (data.images) {
++        XcursorImagesDestroy(data.images);
++        data.images = NULL;
++    }
++    data.image_view.pixels = NULL;
++
      free(data.filename);
      data.filename = NULL;
-+    free(data.flatten);
-+    data.flatten = NULL;
+ }
+@@ -75,6 +97,10 @@ static Cursor module_getcursor(void) {
+     return data.cursor;
  }
  
- static Cursor module_getcursor(void) {
++static const struct aCursorImage *module_getimage(void) {
++    return data.image_view.pixels ? &data.image_view : NULL;
++}
++
+ 
+ struct aModuleCursor alock_cursor_xcursor = {
+     { "xcursor",
+@@ -84,4 +110,5 @@ struct aModuleCursor alock_cursor_xcursor = {
+         module_free,
+     },
+     module_getcursor,
++    module_getimage,
+ };
 diff --git a/src/main.c b/src/main.c
-index e4cb32e..edfc9ee 100644
+index e4cb32e..9a1d730 100644
 --- a/src/main.c
 +++ b/src/main.c
-@@ -175,18 +175,118 @@ static void setBacklightBrightness(float value) {
+@@ -28,6 +28,9 @@
+ #include <X11/Xproto.h>
+ #include <X11/Xutil.h>
+ #include <X11/keysym.h>
++#if ENABLE_XRENDER
++# include <X11/extensions/Xrender.h>
++#endif
+ 
+ 
+ extern char **environ;
+@@ -175,18 +178,315 @@ static void setBacklightBrightness(float value) {
  }
  #endif /* WITH_XBLIGHT */
  
@@ -236,6 +343,176 @@ index e4cb32e..edfc9ee 100644
 +    return cursor;
 +}
 +
++#if ENABLE_XRENDER
++/*
++ * Software-cursor overlay.
++ *
++ * The X11 cursor sprite path on NVIDIA proprietary unreliably composites
++ * ARGB cursors against stale framebuffer pixels after resume — desktop
++ * content from before suspend bleeds through the cursor's transparent
++ * regions.  Six prior approaches that fought the cursor sprite save-under
++ * (paint-wait, pointer warp, blank-swap, XGetImage fence, ungrab/regrab,
++ * XID recreate) did not reliably defeat the NVIDIA cursor cache.
++ *
++ * This overlay sidesteps the X cursor sprite path entirely:
++ *
++ *   - The actual X11 cursor is a 1x1 invisible blank (no visible alpha).
++ *   - The cursor IMAGE is composited directly onto the lock background
++ *     window via XRenderComposite(PictOpOver), in software, on every
++ *     pointer-motion event.
++ *   - A "scratch" pixmap holds the background pixels currently under
++ *     the cursor, so we can cleanly restore them when the pointer moves.
++ *
++ * Because rendering goes through normal window compositing (not cursor
++ * save-under), there is no path for stale framebuffer content to bleed
++ * through the cursor — the bug class is structurally eliminated and the
++ * cursor retains true ARGB transparency against the lock background.
++ */
++struct swCursor {
++    Display *display;
++    int width, height;
++    int xhot, yhot;
++
++    Pixmap src_pm;          /* ARGB cursor pixels (depth 32) */
++    Picture src_pic;
++
++    Window bgwin;           /* the bg window the cursor is drawn on */
++    Picture bg_pic;
++    Pixmap scratch;         /* saved bg pixels under cursor (same depth as bg) */
++    GC scratch_gc;
++    int scratch_valid;
++    int scratch_x, scratch_y;   /* top-left of cursor image (window-local) */
++
++    int last_root_x, last_root_y;  /* last hot-spot position (root coords) */
++};
++
++static struct swCursor *swCursorCreate(Display *dpy,
++        const struct aCursorImage *img, Window bgwin) {
++
++    if (!img || img->width == 0 || img->height == 0)
++        return NULL;
++
++    Screen *screen = DefaultScreenOfDisplay(dpy);
++    Window root = RootWindowOfScreen(screen);
++
++    XRenderPictFormat *argb_fmt =
++            XRenderFindStandardFormat(dpy, PictStandardARGB32);
++    if (!argb_fmt) {
++        fprintf(stderr, "alock: no ARGB32 XRender format\n");
++        return NULL;
++    }
++
++    XWindowAttributes wa;
++    if (!XGetWindowAttributes(dpy, bgwin, &wa))
++        return NULL;
++    XRenderPictFormat *bg_fmt = XRenderFindVisualFormat(dpy, wa.visual);
++    if (!bg_fmt) {
++        fprintf(stderr, "alock: bg window has no XRender format\n");
++        return NULL;
++    }
++
++    struct swCursor *sc = calloc(1, sizeof(*sc));
++    if (!sc) return NULL;
++
++    sc->display = dpy;
++    sc->width = (int)img->width;
++    sc->height = (int)img->height;
++    sc->xhot = (int)img->xhot;
++    sc->yhot = (int)img->yhot;
++    sc->bgwin = bgwin;
++
++    sc->src_pm = XCreatePixmap(dpy, root, sc->width, sc->height, 32);
++    GC gc = XCreateGC(dpy, sc->src_pm, 0, NULL);
++
++    XImage xim;
++    memset(&xim, 0, sizeof(xim));
++    xim.width = sc->width;
++    xim.height = sc->height;
++    xim.format = ZPixmap;
++    xim.data = (char *)img->pixels;
++    xim.byte_order = alock_native_byte_order();
++    xim.bitmap_unit = 32;
++    xim.bitmap_bit_order = xim.byte_order;
++    xim.bitmap_pad = 32;
++    xim.depth = 32;
++    xim.bits_per_pixel = 32;
++    xim.bytes_per_line = sc->width * 4;
++    xim.red_mask   = 0xff0000;
++    xim.green_mask = 0x00ff00;
++    xim.blue_mask  = 0x0000ff;
++    XInitImage(&xim);
++
++    XPutImage(dpy, sc->src_pm, gc, &xim, 0, 0, 0, 0, sc->width, sc->height);
++    XFreeGC(dpy, gc);
++
++    sc->src_pic = XRenderCreatePicture(dpy, sc->src_pm, argb_fmt, 0, NULL);
++    sc->bg_pic = XRenderCreatePicture(dpy, bgwin, bg_fmt, 0, NULL);
++
++    sc->scratch = XCreatePixmap(dpy, bgwin, sc->width, sc->height, wa.depth);
++    sc->scratch_gc = XCreateGC(dpy, bgwin, 0, NULL);
++    sc->scratch_valid = 0;
++
++    return sc;
++}
++
++/* Stamp the cursor so its hot-spot is at root coords (root_x, root_y).
++ * Restores the previous stamp's background first, saves the new region,
++ * then composites the ARGB cursor over the bg. */
++static void swCursorMove(struct swCursor *sc, int root_x, int root_y) {
++
++    if (!sc) return;
++    Display *dpy = sc->display;
++    int nx = root_x - sc->xhot;
++    int ny = root_y - sc->yhot;
++
++    if (sc->scratch_valid && sc->scratch_x == nx && sc->scratch_y == ny)
++        return;
++
++    if (sc->scratch_valid) {
++        XCopyArea(dpy, sc->scratch, sc->bgwin, sc->scratch_gc,
++                0, 0, sc->width, sc->height,
++                sc->scratch_x, sc->scratch_y);
++    }
++
++    XCopyArea(dpy, sc->bgwin, sc->scratch, sc->scratch_gc,
++            nx, ny, sc->width, sc->height, 0, 0);
++    sc->scratch_valid = 1;
++    sc->scratch_x = nx;
++    sc->scratch_y = ny;
++
++    XRenderComposite(dpy, PictOpOver, sc->src_pic, None, sc->bg_pic,
++            0, 0, 0, 0, nx, ny, sc->width, sc->height);
++
++    sc->last_root_x = root_x;
++    sc->last_root_y = root_y;
++}
++
++/* After the bg window has been repainted (resume, screen-config change),
++ * scratch contains stale content for the wrong bg.  Drop it and re-stamp
++ * the cursor at its current position. */
++static void swCursorRestamp(struct swCursor *sc) {
++    if (!sc) return;
++    sc->scratch_valid = 0;
++    swCursorMove(sc, sc->last_root_x, sc->last_root_y);
++}
++
++static void swCursorDestroy(struct swCursor *sc) {
++    if (!sc) return;
++    Display *dpy = sc->display;
++    if (sc->scratch_valid) {
++        XCopyArea(dpy, sc->scratch, sc->bgwin, sc->scratch_gc,
++                0, 0, sc->width, sc->height,
++                sc->scratch_x, sc->scratch_y);
++    }
++    XFreeGC(dpy, sc->scratch_gc);
++    XFreePixmap(dpy, sc->scratch);
++    XRenderFreePicture(dpy, sc->bg_pic);
++    XRenderFreePicture(dpy, sc->src_pic);
++    XFreePixmap(dpy, sc->src_pm);
++    free(sc);
++}
++#endif /* ENABLE_XRENDER */
++
 +/*
 + * Swap grabbed cursor to invisible, repaint backgrounds, wait for the
 + * GPU to finish rendering, then destroy and recreate the real cursor
@@ -243,12 +520,25 @@ index e4cb32e..edfc9ee 100644
 + * NVIDIA's cursor compositing) to allocate fresh sprite storage and
 + * capture the save-under from the now-clean framebuffer, rather than
 + * reusing stale cached data from before suspend.
++ *
++ * In sw-cursor-overlay mode the X cursor is permanently a 1x1 blank,
++ * so this function only repaints backgrounds and re-stamps the overlay.
 + */
 +static void reinstallCursor(Display *display, Cursor blank,
 +        struct aModuleCursor *cursor_module,
++#if ENABLE_XRENDER
++        struct swCursor *sw_cursor,
++#endif
 +        const Window *bgwins, int bgcount) {
 +
-+    XChangeActivePointerGrab(display, 0, blank, CurrentTime);
++#if ENABLE_XRENDER
++    if (sw_cursor == NULL)
++#endif
++    {
++        /* Legacy path: hide the X cursor while repainting. */
++        XChangeActivePointerGrab(display, PointerMotionMask,
++                blank, CurrentTime);
++    }
 +
 +    for (int j = 0; j < bgcount; j++) {
 +        XRaiseWindow(display, bgwins[j]);
@@ -259,20 +549,27 @@ index e4cb32e..edfc9ee 100644
 +    waitForPaint(display, bgwins, bgcount,
 +            ExposureMask | VisibilityChangeMask);
 +
-+    /* Destroy the old cursor and recreate with a fresh XID. */
++#if ENABLE_XRENDER
++    if (sw_cursor) {
++        /* Bg was wiped — re-stamp the cursor overlay. */
++        swCursorRestamp(sw_cursor);
++        return;
++    }
++#endif
++
++    /* Legacy path: destroy and recreate the X cursor with a fresh XID. */
 +    Cursor old = cursor_module->getcursor();
 +    if (old != None) {
 +        XFreeCursor(display, old);
 +        if (cursor_module->m.init(display) != 0) {
-+            /* Reinit failed; stay with blank cursor as a safe
-+             * fallback — no alpha, so no save-under issue. */
 +            fprintf(stderr, "alock: warning, cursor reinit failed\n");
-+            XChangeActivePointerGrab(display, 0, blank, CurrentTime);
++            XChangeActivePointerGrab(display, PointerMotionMask,
++                    blank, CurrentTime);
 +            return;
 +        }
 +    }
 +
-+    XChangeActivePointerGrab(display, 0,
++    XChangeActivePointerGrab(display, PointerMotionMask,
 +            cursor_module->getcursor(), CurrentTime);
 +}
 +
@@ -280,7 +577,11 @@ index e4cb32e..edfc9ee 100644
   * lock this function returns 0, otherwise -1. */
 -static int lockDisplay(Display *display, struct aModules *modules) {
 +static int lockDisplay(Display *display, struct aModules *modules,
-+        Window **out_bgwins, int *out_bgcount, Cursor *out_blank) {
++        Window **out_bgwins, int *out_bgcount, Cursor *out_blank
++#if ENABLE_XRENDER
++        , struct swCursor **out_sw_cursor
++#endif
++        ) {
  
      Window window;
 -    Cursor cursor;
@@ -293,11 +594,14 @@ index e4cb32e..edfc9ee 100644
 +    *out_bgwins = NULL;
 +    *out_bgcount = 0;
 +    *out_blank = None;
++#if ENABLE_XRENDER
++    *out_sw_cursor = NULL;
++#endif
 +
      if (bgwins == NULL) {
          fprintf(stderr, "alock: error window out of memory\n");
          return -1;
-@@ -215,93 +315,22 @@ static int lockDisplay(Display *display, struct aModules *modules) {
+@@ -215,93 +515,25 @@ static int lockDisplay(Display *display, struct aModules *modules) {
          XSelectInput(display, RootWindow(display, i), StructureNotifyMask);
      }
  
@@ -376,9 +680,13 @@ index e4cb32e..edfc9ee 100644
 -     * Grab pointer first without a custom cursor, then switch to the real cursor.
 -     * This reduces "save-under" capturing pre-lock pixels on some servers/drivers.
 -     */
+-    if (XGrabPointer(display, window, False, 0,
 +    Cursor blank = makeBlankCursor(display);
 +
-     if (XGrabPointer(display, window, False, 0,
++    /* Always request pointer-motion events so the software-cursor
++     * overlay (if active) can track the pointer.  Without an overlay
++     * the events are simply ignored. */
++    if (XGrabPointer(display, window, False, PointerMotionMask,
                  GrabModeAsync, GrabModeAsync, None,
 -                None, CurrentTime) != GrabSuccess) {
 +                blank, CurrentTime) != GrabSuccess) {
@@ -396,7 +704,7 @@ index e4cb32e..edfc9ee 100644
      /* try to grab 2 times, another process (windowmanager) may have grabbed
       * the keyboard already */
      if (XGrabKeyboard(display, window, True, GrabModeAsync, GrabModeAsync,
-@@ -310,14 +339,29 @@ static int lockDisplay(Display *display, struct aModules *modules) {
+@@ -310,14 +542,64 @@ static int lockDisplay(Display *display, struct aModules *modules) {
          if (XGrabKeyboard(display, window, True, GrabModeAsync, GrabModeAsync,
                      CurrentTime) != GrabSuccess) {
              fprintf(stderr, "error: grab keyboard failed\n");
@@ -406,13 +714,44 @@ index e4cb32e..edfc9ee 100644
          }
      }
  
++    /* If the cursor module exposes ARGB image data, set up a software-
++     * cursor overlay (composited onto the bg window directly) instead
++     * of using the X server's cursor sprite.  This bypasses the NVIDIA
++     * save-under bleed-through bug entirely. */
++#if ENABLE_XRENDER
++    struct swCursor *sw_cursor = NULL;
++    if (bgcount > 0) {
++        const struct aCursorImage *img = modules->cursor->getimage();
++        if (img) {
++            sw_cursor = swCursorCreate(display, img, bgwins[0]);
++            if (sw_cursor) {
++                /* Seed last-known position with the current pointer. */
++                Window root_ret, child_ret;
++                int rx, ry, wx, wy;
++                unsigned int mask_ret;
++                if (XQueryPointer(display, bgwins[0],
++                            &root_ret, &child_ret,
++                            &rx, &ry, &wx, &wy, &mask_ret)) {
++                    sw_cursor->last_root_x = rx;
++                    sw_cursor->last_root_y = ry;
++                }
++            }
++        }
++    }
++    *out_sw_cursor = sw_cursor;
++#endif
++
 +    /* Grab is held with invisible cursor.  Now repaint, wait for GPU,
-+     * and swap in the real cursor via the shared reinstallCursor path. */
++     * and either swap in the real cursor (legacy) or stamp the sw
++     * overlay (ARGB mode) via the shared reinstallCursor path. */
 +    if (bgcount > 0)
 +        reinstallCursor(display, blank, modules->cursor,
++#if ENABLE_XRENDER
++                sw_cursor,
++#endif
 +                bgwins, bgcount);
 +    else
-+        XChangeActivePointerGrab(display, 0,
++        XChangeActivePointerGrab(display, PointerMotionMask,
 +                modules->cursor->getcursor(), CurrentTime);
 +
 +    *out_bgwins = bgwins;
@@ -423,11 +762,53 @@ index e4cb32e..edfc9ee 100644
  
 -static void eventLoop(Display *display, struct aModules *modules) {
 +static void eventLoop(Display *display, struct aModules *modules,
-+        Window *bgwins, int bgcount, Cursor blank) {
++        Window *bgwins, int bgcount, Cursor blank
++#if ENABLE_XRENDER
++        , struct swCursor *sw_cursor
++#endif
++        ) {
  
      XEvent ev;
      KeySym ks;
-@@ -356,8 +400,31 @@ static void eventLoop(Display *display, struct aModules *modules) {
+@@ -327,6 +609,12 @@ static void eventLoop(Display *display, struct aModules *modules) {
+     unsigned int pass_pos = 0, pass_len = 0;
+     unsigned long keypress_time = 0;
+ 
++    const long event_mask = KeyPressMask | StructureNotifyMask
++#if ENABLE_XRENDER
++            | (sw_cursor ? PointerMotionMask : 0)
++#endif
++            ;
++
+     /* if possible do not page this address to the swap area */
+     mlock(pass, sizeof(pass));
+ 
+@@ -335,7 +623,7 @@ static void eventLoop(Display *display, struct aModules *modules) {
+ 
+         if (keypress_time) {
+             /* check for any key press event (or root window state change) */
+-            if (XCheckMaskEvent(display, KeyPressMask | StructureNotifyMask, &ev) == False) {
++            if (XCheckMaskEvent(display, event_mask, &ev) == False) {
+ 
+                 /* user fell asleep while typing (5 seconds inactivity) */
+                 if (alock_mtime() - keypress_time > 5000) {
+@@ -347,6 +635,15 @@ static void eventLoop(Display *display, struct aModules *modules) {
+                 usleep(25000);
+                 continue;
+             }
++#if ENABLE_XRENDER
++            /* Dispatch motion events to the overlay without exiting
++             * password-entry mode. */
++            if (sw_cursor && ev.type == MotionNotify) {
++                swCursorMove(sw_cursor,
++                        ev.xmotion.x_root, ev.xmotion.y_root);
++                continue;
++            }
++#endif
+         }
+         else {
+ 
+@@ -356,8 +653,44 @@ static void eventLoop(Display *display, struct aModules *modules) {
                  setBacklightBrightness(0);
  #endif /* WITH_XBLIGHT */
  
@@ -444,37 +825,56 @@ index e4cb32e..edfc9ee 100644
 +            unsigned long last = alock_mtime();
 +            int have_event;
 +            for (;;) {
-+                have_event = XCheckMaskEvent(display,
-+                        KeyPressMask | StructureNotifyMask, &ev);
++                have_event = XCheckMaskEvent(display, event_mask, &ev);
 +
 +                unsigned long now = alock_mtime();
 +                if (now - last > 500 && bgcount > 0)
 +                    reinstallCursor(display, blank,
-+                            modules->cursor, bgwins, bgcount);
++                            modules->cursor,
++#if ENABLE_XRENDER
++                            sw_cursor,
++#endif
++                            bgwins, bgcount);
 +                last = now;
 +
-+                if (have_event)
++                if (have_event) {
++#if ENABLE_XRENDER
++                    /* Motion does not count as "user is back" — keep
++                     * waiting for a key press but track the cursor. */
++                    if (sw_cursor && ev.type == MotionNotify) {
++                        swCursorMove(sw_cursor,
++                                ev.xmotion.x_root, ev.xmotion.y_root);
++                        continue;
++                    }
++#endif
 +                    break;
++                }
 +
 +                usleep(100000);
 +            }
  
  #if WITH_XBLIGHT
              /* restore original backlight brightness value */
-@@ -493,12 +560,6 @@ static void eventLoop(Display *display, struct aModules *modules) {
+@@ -493,9 +826,15 @@ static void eventLoop(Display *display, struct aModules *modules) {
              debug("received configure notify event");
              break;
  
 -#if 0
 -        case Expose:
 -            XClearWindow(dpy, ((XExposeEvent*)&ev)->window);
--            break;
--#endif
--
-         }
-     }
- }
-@@ -731,11 +792,15 @@ int main(int argc, char **argv) {
++#if ENABLE_XRENDER
++        case MotionNotify:
++            /* Reached here only when we exited the idle poll loop on a
++             * non-motion event but had a motion event queued at the
++             * outer dispatch (rare).  Track the position; don't change
++             * input state. */
++            if (sw_cursor)
++                swCursorMove(sw_cursor,
++                        ev.xmotion.x_root, ev.xmotion.y_root);
+             break;
+ #endif
+ 
+@@ -731,11 +1070,26 @@ int main(int argc, char **argv) {
  
      /* raise our background window and grab input, if this action has failed,
       * we are not able to lock the screen, then we're fucked... */
@@ -482,102 +882,38 @@ index e4cb32e..edfc9ee 100644
 +    Window *bgwins = NULL;
 +    int bgcount = 0;
 +    Cursor blank = None;
++#if ENABLE_XRENDER
++    struct swCursor *sw_cursor = NULL;
++#endif
 +
-+    if (lockDisplay(display, &modules, &bgwins, &bgcount, &blank))
++    if (lockDisplay(display, &modules, &bgwins, &bgcount, &blank
++#if ENABLE_XRENDER
++                , &sw_cursor
++#endif
++                ))
          goto return_failure;
  
      debug("entering main event loop");
 -    eventLoop(display, &modules);
-+    eventLoop(display, &modules, bgwins, bgcount, blank);
++    eventLoop(display, &modules, bgwins, bgcount, blank
++#if ENABLE_XRENDER
++            , sw_cursor
++#endif
++            );
  
      retval = EXIT_SUCCESS;
      goto return_success;
-@@ -745,6 +810,9 @@ return_failure:
+@@ -745,6 +1099,13 @@ return_failure:
  
  return_success:
  
++#if ENABLE_XRENDER
++    if (sw_cursor)
++        swCursorDestroy(sw_cursor);
++#endif
 +    free(bgwins);
 +    if (blank != None)
 +        XFreeCursor(display, blank);
      modules.auth->m.free();
      modules.cursor->m.free();
      modules.input->m.free();
-diff --git a/src/utils.c b/src/utils.c
-index 91aff58..e017dc1 100644
---- a/src/utils.c
-+++ b/src/utils.c
-@@ -316,6 +316,74 @@ int alock_grayscale_image(XImage *image,
-     return 1;
- }
- 
-+/* Parse a color name (X11 named color or #rrggbb) into 8-bit RGB values
-+ * without allocating a colormap entry. Returns 1 on success, 0 on
-+ * failure (in which case r, g, and b are all set to 0). */
-+int alock_parse_rgb(Display *display, const char *name,
-+        uint8_t *r, uint8_t *g, uint8_t *b) {
-+
-+    *r = *g = *b = 0;
-+
-+    if (!display || !name)
-+        return 0;
-+
-+    XColor c;
-+    Colormap cmap = DefaultColormap(display, DefaultScreen(display));
-+    if (XParseColor(display, cmap, name, &c) == 0)
-+        return 0;
-+
-+    *r = c.red   >> 8;
-+    *g = c.green >> 8;
-+    *b = c.blue  >> 8;
-+    return 1;
-+}
-+
-+/* Composite ARGB pixel data against an opaque background color,
-+ * producing fully-opaque pixels (alpha = 255) with the same visible
-+ * appearance as the original pixels would have on that background.
-+ *
-+ * Pixel format: 0xAARRGGBB (alpha in bits 24-31, R in 16-23, G in 8-15,
-+ * B in 0-7).  Set `premultiplied` to nonzero if the input RGB channels
-+ * are already pre-multiplied by alpha (e.g. xcursor format); zero if
-+ * the input is straight ARGB (e.g. imlib2 cursor data as currently
-+ * used in alock).
-+ *
-+ * Eliminating non-255 alpha removes any save-under requirement when the
-+ * cursor is composited by the X server, so stale framebuffer pixels
-+ * cannot bleed through the cursor on resume from suspend. */
-+void alock_flatten_argb(uint32_t *pixels, size_t count,
-+        uint8_t bg_r, uint8_t bg_g, uint8_t bg_b,
-+        int premultiplied) {
-+
-+    if (!pixels)
-+        return;
-+
-+    for (size_t i = 0; i < count; i++) {
-+        uint32_t px = pixels[i];
-+        unsigned a = (px >> 24) & 0xff;
-+        unsigned r = (px >> 16) & 0xff;
-+        unsigned g = (px >>  8) & 0xff;
-+        unsigned b = (px >>  0) & 0xff;
-+        unsigned inv = 255 - a;
-+
-+        unsigned out_r, out_g, out_b;
-+        if (premultiplied) {
-+            out_r = r + (bg_r * inv + 127) / 255;
-+            out_g = g + (bg_g * inv + 127) / 255;
-+            out_b = b + (bg_b * inv + 127) / 255;
-+        } else {
-+            out_r = (r * a + bg_r * inv + 127) / 255;
-+            out_g = (g * a + bg_g * inv + 127) / 255;
-+            out_b = (b * a + bg_b * inv + 127) / 255;
-+        }
-+        if (out_r > 255) out_r = 255;
-+        if (out_g > 255) out_g = 255;
-+        if (out_b > 255) out_b = 255;
-+
-+        pixels[i] = (0xffu << 24) | (out_r << 16) | (out_g << 8) | out_b;
-+    }
-+}
-+
- /* Dummy function for module interface. */
- void module_dummy_loadargs(const char *args) {
-     (void)args;
