@@ -17,7 +17,7 @@ index 5f45b5d..1333aab 100644
 +src/.deps/
 +src/alock
 diff --git a/src/main.c b/src/main.c
-index e4cb32e..79ee701 100644
+index e4cb32e..6e58309 100644
 --- a/src/main.c
 +++ b/src/main.c
 @@ -16,7 +16,6 @@
@@ -139,17 +139,19 @@ index e4cb32e..79ee701 100644
  
      free(bgwins);
  
-@@ -317,6 +296,31 @@ static int lockDisplay(Display *display, struct aModules *modules) {
+@@ -317,6 +296,43 @@ static int lockDisplay(Display *display, struct aModules *modules) {
      return 0;
  }
  
 +/* On resume from suspend, swap to a blank cursor, repaint all background
-+ * windows, hold for 500 ms to allow the GPU scanout buffer to update, then
-+ * restore the ARGB cursor.  The pointer grab is never released. */
++ * windows, wait for the repaint to land, then restore the ARGB cursor.
++ * The pointer grab is never released. */
 +static void refreshCursorAfterResume(Display *display, struct aModules *modules,
 +                                     Cursor blank_cursor, Cursor argb_cursor) {
 +
 +    int nscreens = ScreenCount(display);
++    Window bgwins[nscreens];
++    int bgcount = 0;
 +
 +    XChangeActivePointerGrab(display, 0, blank_cursor, CurrentTime);
 +
@@ -157,12 +159,22 @@ index e4cb32e..79ee701 100644
 +        Window bg = modules->background->getwindow(i);
 +        if (bg != None) {
 +            XRaiseWindow(display, bg);
-+            XClearWindow(display, bg);
++            /* XClearArea with exposures=True generates an Expose event so
++             * waitForPaint can confirm the repaint reached the server. */
++            XClearArea(display, bg, 0, 0, 0, 0, True);
++            bgwins[bgcount++] = bg;
 +        }
 +    }
 +
 +    XSync(display, False);
-+    usleep(500000);
++
++    if (bgcount > 0)
++        waitForPaint(display, bgwins, bgcount, 1000);
++    else
++        usleep(500000);
++
++    /* Extra settle time for the GPU scanout buffer after the Expose lands. */
++    usleep(100000);
 +
 +    XChangeActivePointerGrab(display, 0, argb_cursor, CurrentTime);
 +    XSync(display, False);
@@ -171,7 +183,7 @@ index e4cb32e..79ee701 100644
  static void eventLoop(Display *display, struct aModules *modules) {
  
      XEvent ev;
-@@ -326,10 +330,21 @@ static void eventLoop(Display *display, struct aModules *modules) {
+@@ -326,10 +342,21 @@ static void eventLoop(Display *display, struct aModules *modules) {
      unsigned int clen;
      unsigned int pass_pos = 0, pass_len = 0;
      unsigned long keypress_time = 0;
@@ -193,19 +205,19 @@ index e4cb32e..79ee701 100644
      debug("entering event main loop");
      for (;;) {
  
-@@ -343,6 +358,11 @@ static void eventLoop(Display *display, struct aModules *modules) {
+@@ -343,6 +370,11 @@ static void eventLoop(Display *display, struct aModules *modules) {
                      keypress_time = 0;
                  }
  
 +                unsigned long now = alock_mtime();
 +                if (now - last_time > 500)
 +                    refreshCursorAfterResume(display, modules, blank_cursor, argb_cursor);
-+                last_time = now;
++                last_time = alock_mtime();
 +
                  /* wait a bit */
                  usleep(25000);
                  continue;
-@@ -356,8 +376,14 @@ static void eventLoop(Display *display, struct aModules *modules) {
+@@ -356,8 +388,14 @@ static void eventLoop(Display *display, struct aModules *modules) {
                  setBacklightBrightness(0);
  #endif /* WITH_XBLIGHT */
  
@@ -216,13 +228,13 @@ index e4cb32e..79ee701 100644
 +                unsigned long now = alock_mtime();
 +                if (now - last_time > 500)
 +                    refreshCursorAfterResume(display, modules, blank_cursor, argb_cursor);
-+                last_time = now;
++                last_time = alock_mtime();
 +                usleep(100000);
 +            }
  
  #if WITH_XBLIGHT
              /* restore original backlight brightness value */
-@@ -366,6 +392,8 @@ static void eventLoop(Display *display, struct aModules *modules) {
+@@ -366,6 +404,8 @@ static void eventLoop(Display *display, struct aModules *modules) {
  #endif /* WITH_XBLIGHT */
          }
  
