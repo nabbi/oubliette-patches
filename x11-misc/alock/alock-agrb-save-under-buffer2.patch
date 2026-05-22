@@ -17,7 +17,7 @@ index 5f45b5d..1333aab 100644
 +src/.deps/
 +src/alock
 diff --git a/src/main.c b/src/main.c
-index e4cb32e..6e58309 100644
+index e4cb32e..e21306f 100644
 --- a/src/main.c
 +++ b/src/main.c
 @@ -16,7 +16,6 @@
@@ -28,13 +28,11 @@ index e4cb32e..6e58309 100644
  #include <stdlib.h>
  #include <string.h>
  #include <unistd.h>
-@@ -175,6 +174,40 @@ static void setBacklightBrightness(float value) {
+@@ -175,6 +174,38 @@ static void setBacklightBrightness(float value) {
  }
  #endif /* WITH_XBLIGHT */
  
-+/* Waits up to timeout_ms for an Expose or VisibilityNotify from one of
-+ * wins[].  Drains unrelated StructureNotify events to keep the queue
-+ * clean.  Returns as soon as a matching event arrives. */
++/* Polls up to timeout_ms for Expose/VisibilityNotify from any of wins[]. */
 +static void waitForPaint(Display *display, Window *wins, int nwins,
 +                         unsigned long timeout_ms) {
 +
@@ -69,7 +67,7 @@ index e4cb32e..6e58309 100644
  /* Lock current display and grab pointer and keyboard. On successful
   * lock this function returns 0, otherwise -1. */
  static int lockDisplay(Display *display, struct aModules *modules) {
-@@ -221,65 +254,11 @@ static int lockDisplay(Display *display, struct aModules *modules) {
+@@ -221,65 +252,11 @@ static int lockDisplay(Display *display, struct aModules *modules) {
       */
      XSync(display, False);
  
@@ -139,7 +137,7 @@ index e4cb32e..6e58309 100644
  
      free(bgwins);
  
-@@ -317,6 +296,43 @@ static int lockDisplay(Display *display, struct aModules *modules) {
+@@ -317,6 +294,49 @@ static int lockDisplay(Display *display, struct aModules *modules) {
      return 0;
  }
  
@@ -155,12 +153,18 @@ index e4cb32e..6e58309 100644
 +
 +    XChangeActivePointerGrab(display, 0, blank_cursor, CurrentTime);
 +
++    /* Discard stale paint events so waitForPaint sees only the fresh ones below. */
++    {
++        XEvent drain_ev;
++        while (XCheckMaskEvent(display, ExposureMask | VisibilityChangeMask, &drain_ev))
++            ;
++    }
++
 +    for (int i = 0; i < nscreens; i++) {
 +        Window bg = modules->background->getwindow(i);
 +        if (bg != None) {
 +            XRaiseWindow(display, bg);
-+            /* XClearArea with exposures=True generates an Expose event so
-+             * waitForPaint can confirm the repaint reached the server. */
++            /* XClearArea with exposures=True generates an Expose event for waitForPaint. */
 +            XClearArea(display, bg, 0, 0, 0, 0, True);
 +            bgwins[bgcount++] = bg;
 +        }
@@ -183,7 +187,7 @@ index e4cb32e..6e58309 100644
  static void eventLoop(Display *display, struct aModules *modules) {
  
      XEvent ev;
-@@ -326,10 +342,21 @@ static void eventLoop(Display *display, struct aModules *modules) {
+@@ -326,10 +346,21 @@ static void eventLoop(Display *display, struct aModules *modules) {
      unsigned int clen;
      unsigned int pass_pos = 0, pass_len = 0;
      unsigned long keypress_time = 0;
@@ -205,7 +209,7 @@ index e4cb32e..6e58309 100644
      debug("entering event main loop");
      for (;;) {
  
-@@ -343,6 +370,11 @@ static void eventLoop(Display *display, struct aModules *modules) {
+@@ -343,6 +374,11 @@ static void eventLoop(Display *display, struct aModules *modules) {
                      keypress_time = 0;
                  }
  
@@ -217,7 +221,7 @@ index e4cb32e..6e58309 100644
                  /* wait a bit */
                  usleep(25000);
                  continue;
-@@ -356,8 +388,14 @@ static void eventLoop(Display *display, struct aModules *modules) {
+@@ -356,8 +392,14 @@ static void eventLoop(Display *display, struct aModules *modules) {
                  setBacklightBrightness(0);
  #endif /* WITH_XBLIGHT */
  
@@ -234,7 +238,7 @@ index e4cb32e..6e58309 100644
  
  #if WITH_XBLIGHT
              /* restore original backlight brightness value */
-@@ -366,6 +404,8 @@ static void eventLoop(Display *display, struct aModules *modules) {
+@@ -366,6 +408,8 @@ static void eventLoop(Display *display, struct aModules *modules) {
  #endif /* WITH_XBLIGHT */
          }
  
@@ -242,4 +246,12 @@ index e4cb32e..6e58309 100644
 +
          switch (ev.type) {
          case KeyPress:
+ 
+@@ -462,6 +506,7 @@ static void eventLoop(Display *display, struct aModules *modules) {
+ 
+                 if (rv == 0) { /* successful authentication */
+                     modules->input->setstate(AINPUT_STATE_VALID);
++                    XFreeCursor(display, blank_cursor);
+                     return;
+                 }
  
