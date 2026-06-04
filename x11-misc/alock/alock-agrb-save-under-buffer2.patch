@@ -16,11 +16,53 @@ index 5f45b5d..1333aab 100644
 +src/Makefile
 +src/.deps/
 +src/alock
+diff --git a/configure.ac b/configure.ac
+index d567372..7ceb143 100644
+--- a/configure.ac
++++ b/configure.ac
+@@ -21,6 +21,7 @@ AM_COND_IF([ENABLE_DEBUG], [
+ 
+ AC_SEARCH_LIBS([clock_gettime], [rt])
+ PKG_CHECK_MODULES([X11], [x11])
++PKG_CHECK_MODULES([XFIXES], [xfixes])
+ 
+ # check for the Misc X Extension library
+ PKG_CHECK_MODULES([XEXT], [xext],
+diff --git a/src/Makefile.am b/src/Makefile.am
+index f81d4dd..7c16c2c 100644
+--- a/src/Makefile.am
++++ b/src/Makefile.am
+@@ -21,7 +21,8 @@ alock_CFLAGS = \
+ 	@XEXT_CFLAGS@ \
+ 	@XPM_CFLAGS@ \
+ 	@XRENDER_CFLAGS@ \
+-	@IMLIB2_CFLAGS@
++	@IMLIB2_CFLAGS@ \
++	@XFIXES_CFLAGS@
+ 
+ alock_LDADD = \
+ 	@X11_LIBS@ \
+@@ -29,7 +30,8 @@ alock_LDADD = \
+ 	@XEXT_LIBS@ \
+ 	@XPM_LIBS@ \
+ 	@XRENDER_LIBS@ \
+-	@IMLIB2_LIBS@
++	@IMLIB2_LIBS@ \
++	@XFIXES_LIBS@
+ 
+ if ENABLE_PAM
+ alock_SOURCES += auth_pam.c
 diff --git a/src/main.c b/src/main.c
-index e4cb32e..e21306f 100644
+index e4cb32e..bce9fd2 100644
 --- a/src/main.c
 +++ b/src/main.c
-@@ -16,7 +16,6 @@
+@@ -11,12 +11,12 @@
+ 
+ #include "alock.h"
+ 
++#include <X11/extensions/Xfixes.h>
+ #include <ctype.h>
+ #include <getopt.h>
  #include <locale.h>
  #include <signal.h>
  #include <spawn.h>
@@ -28,7 +70,7 @@ index e4cb32e..e21306f 100644
  #include <stdlib.h>
  #include <string.h>
  #include <unistd.h>
-@@ -175,6 +174,38 @@ static void setBacklightBrightness(float value) {
+@@ -175,6 +175,38 @@ static void setBacklightBrightness(float value) {
  }
  #endif /* WITH_XBLIGHT */
  
@@ -67,7 +109,7 @@ index e4cb32e..e21306f 100644
  /* Lock current display and grab pointer and keyboard. On successful
   * lock this function returns 0, otherwise -1. */
  static int lockDisplay(Display *display, struct aModules *modules) {
-@@ -221,65 +252,11 @@ static int lockDisplay(Display *display, struct aModules *modules) {
+@@ -221,65 +253,11 @@ static int lockDisplay(Display *display, struct aModules *modules) {
       */
      XSync(display, False);
  
@@ -137,21 +179,25 @@ index e4cb32e..e21306f 100644
  
      free(bgwins);
  
-@@ -317,6 +294,49 @@ static int lockDisplay(Display *display, struct aModules *modules) {
+@@ -317,6 +295,61 @@ static int lockDisplay(Display *display, struct aModules *modules) {
      return 0;
  }
  
-+/* On resume from suspend, swap to a blank cursor, repaint all background
-+ * windows, wait for the repaint to land, then restore the ARGB cursor.
-+ * The pointer grab is never released. */
-+static void refreshCursorAfterResume(Display *display, struct aModules *modules,
-+                                     Cursor blank_cursor, Cursor argb_cursor) {
++/* On resume from suspend, hide the cursor via XFixes, repaint all background
++ * windows, wait for the repaint to land, then show the cursor again.
++ * XFixesHideCursor removes the cursor from the rendering pipeline entirely,
++ * so XFixesShowCursor forces the driver to re-read the framebuffer from scratch
++ * rather than reusing any cached sprite backing. The pointer grab is never released. */
++static void refreshCursorAfterResume(Display *display, struct aModules *modules) {
 +
 +    int nscreens = ScreenCount(display);
 +    Window bgwins[nscreens];
 +    int bgcount = 0;
 +
-+    XChangeActivePointerGrab(display, 0, blank_cursor, CurrentTime);
++    /* Hide cursor on all screens: no transparency compositing during repaint,
++     * and no stale save-under cache to reuse when the cursor reappears. */
++    for (int i = 0; i < nscreens; i++)
++        XFixesHideCursor(display, RootWindow(display, i));
 +
 +    /* Discard stale paint events so waitForPaint sees only the fresh ones below. */
 +    {
@@ -172,22 +218,30 @@ index e4cb32e..e21306f 100644
 +
 +    XSync(display, False);
 +
-+    if (bgcount > 0)
++    if (bgcount > 0) {
 +        waitForPaint(display, bgwins, bgcount, 1000);
-+    else
++        /* GPU fence: XGetImage forces the server to finish rendering all pending
++         * drawing commands to the framebuffer before we restore the cursor. */
++        XImage *img = XGetImage(display, bgwins[0], 0, 0, 1, 1, AllPlanes, ZPixmap);
++        if (img) XDestroyImage(img);
++    } else {
 +        usleep(500000);
++    }
 +
-+    /* Extra settle time for the GPU scanout buffer after the Expose lands. */
++    /* Extra settle time for the GPU scanout buffer. */
 +    usleep(100000);
 +
-+    XChangeActivePointerGrab(display, 0, argb_cursor, CurrentTime);
++    /* Restore cursor: the driver reads the framebuffer fresh at this point. */
++    for (int i = 0; i < nscreens; i++)
++        XFixesShowCursor(display, RootWindow(display, i));
++
 +    XSync(display, False);
 +}
 +
  static void eventLoop(Display *display, struct aModules *modules) {
  
      XEvent ev;
-@@ -326,10 +346,21 @@ static void eventLoop(Display *display, struct aModules *modules) {
+@@ -326,6 +359,7 @@ static void eventLoop(Display *display, struct aModules *modules) {
      unsigned int clen;
      unsigned int pass_pos = 0, pass_len = 0;
      unsigned long keypress_time = 0;
@@ -195,33 +249,19 @@ index e4cb32e..e21306f 100644
  
      /* if possible do not page this address to the swap area */
      mlock(pass, sizeof(pass));
- 
-+    Cursor blank_cursor;
-+    {
-+        Window root = DefaultRootWindow(display);
-+        Pixmap p = XCreatePixmap(display, root, 1, 1, 1);
-+        XColor black = {0};
-+        blank_cursor = XCreatePixmapCursor(display, p, p, &black, &black, 0, 0);
-+        XFreePixmap(display, p);
-+    }
-+    Cursor argb_cursor = modules->cursor->getcursor();
-+
-     debug("entering event main loop");
-     for (;;) {
- 
-@@ -343,6 +374,11 @@ static void eventLoop(Display *display, struct aModules *modules) {
+@@ -343,6 +377,11 @@ static void eventLoop(Display *display, struct aModules *modules) {
                      keypress_time = 0;
                  }
  
 +                unsigned long now = alock_mtime();
 +                if (now - last_time > 500)
-+                    refreshCursorAfterResume(display, modules, blank_cursor, argb_cursor);
++                    refreshCursorAfterResume(display, modules);
 +                last_time = alock_mtime();
 +
                  /* wait a bit */
                  usleep(25000);
                  continue;
-@@ -356,8 +392,14 @@ static void eventLoop(Display *display, struct aModules *modules) {
+@@ -356,8 +395,14 @@ static void eventLoop(Display *display, struct aModules *modules) {
                  setBacklightBrightness(0);
  #endif /* WITH_XBLIGHT */
  
@@ -231,14 +271,14 @@ index e4cb32e..e21306f 100644
 +            while (XCheckMaskEvent(display, KeyPressMask | StructureNotifyMask, &ev) == False) {
 +                unsigned long now = alock_mtime();
 +                if (now - last_time > 500)
-+                    refreshCursorAfterResume(display, modules, blank_cursor, argb_cursor);
++                    refreshCursorAfterResume(display, modules);
 +                last_time = alock_mtime();
 +                usleep(100000);
 +            }
  
  #if WITH_XBLIGHT
              /* restore original backlight brightness value */
-@@ -366,6 +408,8 @@ static void eventLoop(Display *display, struct aModules *modules) {
+@@ -366,6 +411,8 @@ static void eventLoop(Display *display, struct aModules *modules) {
  #endif /* WITH_XBLIGHT */
          }
  
@@ -246,12 +286,4 @@ index e4cb32e..e21306f 100644
 +
          switch (ev.type) {
          case KeyPress:
- 
-@@ -462,6 +506,7 @@ static void eventLoop(Display *display, struct aModules *modules) {
- 
-                 if (rv == 0) { /* successful authentication */
-                     modules->input->setstate(AINPUT_STATE_VALID);
-+                    XFreeCursor(display, blank_cursor);
-                     return;
-                 }
  
