@@ -56,7 +56,7 @@ index f81d4dd..f60553c 100644
  if ENABLE_PAM
  alock_SOURCES += auth_pam.c
 diff --git a/src/main.c b/src/main.c
-index e4cb32e..eb591d4 100644
+index e4cb32e..55a5407 100644
 --- a/src/main.c
 +++ b/src/main.c
 @@ -11,12 +11,13 @@
@@ -183,27 +183,45 @@ index e4cb32e..eb591d4 100644
  
      free(bgwins);
  
-@@ -317,6 +296,80 @@ static int lockDisplay(Display *display, struct aModules *modules) {
+@@ -317,6 +296,79 @@ static int lockDisplay(Display *display, struct aModules *modules) {
      return 0;
  }
  
-+/* On resume from suspend, hide the cursor via XFixes, repaint all background
++/* On resume from suspend, hide the cursor via XFixes, reinitialize the cursor
++ * hardware plane via an XRandR same-mode modeset, repaint all background
 + * windows, wait for the repaint to land, then show the cursor again.
-+ * XFixesHideCursor removes the cursor from the rendering pipeline entirely,
-+ * so XFixesShowCursor forces the driver to re-read the framebuffer from scratch
-+ * rather than reusing any cached sprite backing. The pointer grab is never released. */
++ * Modeset order matters: the hardware reinit must happen while the cursor is
++ * hidden and before the clean framebuffer is presented, so ShowCursor forces
++ * the driver to read fresh pixels rather than any cached sprite backing. */
 +static void refreshCursorAfterResume(Display *display, struct aModules *modules) {
 +
 +    int nscreens = ScreenCount(display);
 +    Window bgwins[nscreens];
 +    int bgcount = 0;
 +
-+    /* Hide cursor on all screens: no transparency compositing during repaint,
-+     * and no stale save-under cache to reuse when the cursor reappears. */
 +    for (int i = 0; i < nscreens; i++)
 +        XFixesHideCursor(display, RootWindow(display, i));
 +
-+    /* Discard stale paint events so waitForPaint sees only the fresh ones below. */
++    /* Reinit cursor hardware plane while cursor is hidden and framebuffer may
++     * still be stale — the driver has no cached sprite to reuse after this. */
++    for (int i = 0; i < nscreens; i++) {
++        Window root = RootWindow(display, i);
++        XRRScreenResources *rr = XRRGetScreenResourcesCurrent(display, root);
++        if (!rr) continue;
++        for (int c = 0; c < rr->ncrtc; c++) {
++            XRRCrtcInfo *ci = XRRGetCrtcInfo(display, rr, rr->crtcs[c]);
++            if (ci && ci->mode != None)
++                XRRSetCrtcConfig(display, rr, rr->crtcs[c], CurrentTime,
++                        ci->x, ci->y, ci->mode, ci->rotation,
++                        ci->outputs, ci->noutput);
++            if (ci) XRRFreeCrtcInfo(ci);
++        }
++        XRRFreeScreenResources(rr);
++    }
++    XSync(display, False);
++
++    /* Discard stale paint events (including those from the modeset) so
++     * waitForPaint sees only the fresh ones from the XClearArea calls below. */
 +    {
 +        XEvent drain_ev;
 +        while (XCheckMaskEvent(display, ExposureMask | VisibilityChangeMask, &drain_ev))
@@ -224,37 +242,18 @@ index e4cb32e..eb591d4 100644
 +
 +    if (bgcount > 0) {
 +        waitForPaint(display, bgwins, bgcount, 1000);
-+        /* GPU fence: XGetImage forces the server to finish rendering all pending
-+         * drawing commands to the framebuffer before we restore the cursor. */
++        /* GPU fence: forces the server to finish rendering before we restore the cursor. */
 +        XImage *img = XGetImage(display, bgwins[0], 0, 0, 1, 1, AllPlanes, ZPixmap);
 +        if (img) XDestroyImage(img);
 +    } else {
 +        usleep(500000);
 +    }
 +
-+    /* Extra settle time for the GPU scanout buffer. */
++    /* GPU scanout settle time. */
 +    usleep(100000);
 +
-+    /* XRandR same-mode modeset: forces the driver to tear down and reinitialize
-+     * the cursor hardware plane so there is no stale save-under cache to reuse
-+     * when ShowCursor re-enables the sprite. */
-+    for (int i = 0; i < nscreens; i++) {
-+        Window root = RootWindow(display, i);
-+        XRRScreenResources *rr = XRRGetScreenResourcesCurrent(display, root);
-+        if (!rr) continue;
-+        for (int c = 0; c < rr->ncrtc; c++) {
-+            XRRCrtcInfo *ci = XRRGetCrtcInfo(display, rr, rr->crtcs[c]);
-+            if (ci && ci->mode != None)
-+                XRRSetCrtcConfig(display, rr, rr->crtcs[c], CurrentTime,
-+                        ci->x, ci->y, ci->mode, ci->rotation,
-+                        ci->outputs, ci->noutput);
-+            if (ci) XRRFreeCrtcInfo(ci);
-+        }
-+        XRRFreeScreenResources(rr);
-+    }
-+    XSync(display, False);
-+
-+    /* Restore cursor: the driver reads the framebuffer fresh after the modeset. */
++    /* Restore cursor: driver must re-read the framebuffer post-modeset reinit,
++     * which now contains clean lock-screen pixels. */
 +    for (int i = 0; i < nscreens; i++)
 +        XFixesShowCursor(display, RootWindow(display, i));
 +
@@ -264,7 +263,7 @@ index e4cb32e..eb591d4 100644
  static void eventLoop(Display *display, struct aModules *modules) {
  
      XEvent ev;
-@@ -326,6 +379,7 @@ static void eventLoop(Display *display, struct aModules *modules) {
+@@ -326,6 +378,7 @@ static void eventLoop(Display *display, struct aModules *modules) {
      unsigned int clen;
      unsigned int pass_pos = 0, pass_len = 0;
      unsigned long keypress_time = 0;
@@ -272,7 +271,7 @@ index e4cb32e..eb591d4 100644
  
      /* if possible do not page this address to the swap area */
      mlock(pass, sizeof(pass));
-@@ -343,6 +397,11 @@ static void eventLoop(Display *display, struct aModules *modules) {
+@@ -343,6 +396,11 @@ static void eventLoop(Display *display, struct aModules *modules) {
                      keypress_time = 0;
                  }
  
@@ -284,7 +283,7 @@ index e4cb32e..eb591d4 100644
                  /* wait a bit */
                  usleep(25000);
                  continue;
-@@ -356,8 +415,14 @@ static void eventLoop(Display *display, struct aModules *modules) {
+@@ -356,8 +414,14 @@ static void eventLoop(Display *display, struct aModules *modules) {
                  setBacklightBrightness(0);
  #endif /* WITH_XBLIGHT */
  
@@ -301,7 +300,7 @@ index e4cb32e..eb591d4 100644
  
  #if WITH_XBLIGHT
              /* restore original backlight brightness value */
-@@ -366,6 +431,8 @@ static void eventLoop(Display *display, struct aModules *modules) {
+@@ -366,6 +430,8 @@ static void eventLoop(Display *display, struct aModules *modules) {
  #endif /* WITH_XBLIGHT */
          }
  
