@@ -17,50 +17,54 @@ index 5f45b5d..1333aab 100644
 +src/.deps/
 +src/alock
 diff --git a/configure.ac b/configure.ac
-index d567372..7ceb143 100644
+index d567372..1654c45 100644
 --- a/configure.ac
 +++ b/configure.ac
-@@ -21,6 +21,7 @@ AM_COND_IF([ENABLE_DEBUG], [
+@@ -21,6 +21,8 @@ AM_COND_IF([ENABLE_DEBUG], [
  
  AC_SEARCH_LIBS([clock_gettime], [rt])
  PKG_CHECK_MODULES([X11], [x11])
 +PKG_CHECK_MODULES([XFIXES], [xfixes])
++PKG_CHECK_MODULES([XRANDR], [xrandr])
  
  # check for the Misc X Extension library
  PKG_CHECK_MODULES([XEXT], [xext],
 diff --git a/src/Makefile.am b/src/Makefile.am
-index f81d4dd..7c16c2c 100644
+index f81d4dd..f60553c 100644
 --- a/src/Makefile.am
 +++ b/src/Makefile.am
-@@ -21,7 +21,8 @@ alock_CFLAGS = \
+@@ -21,7 +21,9 @@ alock_CFLAGS = \
  	@XEXT_CFLAGS@ \
  	@XPM_CFLAGS@ \
  	@XRENDER_CFLAGS@ \
 -	@IMLIB2_CFLAGS@
 +	@IMLIB2_CFLAGS@ \
-+	@XFIXES_CFLAGS@
++	@XFIXES_CFLAGS@ \
++	@XRANDR_CFLAGS@
  
  alock_LDADD = \
  	@X11_LIBS@ \
-@@ -29,7 +30,8 @@ alock_LDADD = \
+@@ -29,7 +31,9 @@ alock_LDADD = \
  	@XEXT_LIBS@ \
  	@XPM_LIBS@ \
  	@XRENDER_LIBS@ \
 -	@IMLIB2_LIBS@
 +	@IMLIB2_LIBS@ \
-+	@XFIXES_LIBS@
++	@XFIXES_LIBS@ \
++	@XRANDR_LIBS@
  
  if ENABLE_PAM
  alock_SOURCES += auth_pam.c
 diff --git a/src/main.c b/src/main.c
-index e4cb32e..bce9fd2 100644
+index e4cb32e..eb591d4 100644
 --- a/src/main.c
 +++ b/src/main.c
-@@ -11,12 +11,12 @@
+@@ -11,12 +11,13 @@
  
  #include "alock.h"
  
 +#include <X11/extensions/Xfixes.h>
++#include <X11/extensions/Xrandr.h>
  #include <ctype.h>
  #include <getopt.h>
  #include <locale.h>
@@ -70,7 +74,7 @@ index e4cb32e..bce9fd2 100644
  #include <stdlib.h>
  #include <string.h>
  #include <unistd.h>
-@@ -175,6 +175,38 @@ static void setBacklightBrightness(float value) {
+@@ -175,6 +176,38 @@ static void setBacklightBrightness(float value) {
  }
  #endif /* WITH_XBLIGHT */
  
@@ -109,7 +113,7 @@ index e4cb32e..bce9fd2 100644
  /* Lock current display and grab pointer and keyboard. On successful
   * lock this function returns 0, otherwise -1. */
  static int lockDisplay(Display *display, struct aModules *modules) {
-@@ -221,65 +253,11 @@ static int lockDisplay(Display *display, struct aModules *modules) {
+@@ -221,65 +254,11 @@ static int lockDisplay(Display *display, struct aModules *modules) {
       */
      XSync(display, False);
  
@@ -179,7 +183,7 @@ index e4cb32e..bce9fd2 100644
  
      free(bgwins);
  
-@@ -317,6 +295,61 @@ static int lockDisplay(Display *display, struct aModules *modules) {
+@@ -317,6 +296,80 @@ static int lockDisplay(Display *display, struct aModules *modules) {
      return 0;
  }
  
@@ -231,7 +235,26 @@ index e4cb32e..bce9fd2 100644
 +    /* Extra settle time for the GPU scanout buffer. */
 +    usleep(100000);
 +
-+    /* Restore cursor: the driver reads the framebuffer fresh at this point. */
++    /* XRandR same-mode modeset: forces the driver to tear down and reinitialize
++     * the cursor hardware plane so there is no stale save-under cache to reuse
++     * when ShowCursor re-enables the sprite. */
++    for (int i = 0; i < nscreens; i++) {
++        Window root = RootWindow(display, i);
++        XRRScreenResources *rr = XRRGetScreenResourcesCurrent(display, root);
++        if (!rr) continue;
++        for (int c = 0; c < rr->ncrtc; c++) {
++            XRRCrtcInfo *ci = XRRGetCrtcInfo(display, rr, rr->crtcs[c]);
++            if (ci && ci->mode != None)
++                XRRSetCrtcConfig(display, rr, rr->crtcs[c], CurrentTime,
++                        ci->x, ci->y, ci->mode, ci->rotation,
++                        ci->outputs, ci->noutput);
++            if (ci) XRRFreeCrtcInfo(ci);
++        }
++        XRRFreeScreenResources(rr);
++    }
++    XSync(display, False);
++
++    /* Restore cursor: the driver reads the framebuffer fresh after the modeset. */
 +    for (int i = 0; i < nscreens; i++)
 +        XFixesShowCursor(display, RootWindow(display, i));
 +
@@ -241,7 +264,7 @@ index e4cb32e..bce9fd2 100644
  static void eventLoop(Display *display, struct aModules *modules) {
  
      XEvent ev;
-@@ -326,6 +359,7 @@ static void eventLoop(Display *display, struct aModules *modules) {
+@@ -326,6 +379,7 @@ static void eventLoop(Display *display, struct aModules *modules) {
      unsigned int clen;
      unsigned int pass_pos = 0, pass_len = 0;
      unsigned long keypress_time = 0;
@@ -249,7 +272,7 @@ index e4cb32e..bce9fd2 100644
  
      /* if possible do not page this address to the swap area */
      mlock(pass, sizeof(pass));
-@@ -343,6 +377,11 @@ static void eventLoop(Display *display, struct aModules *modules) {
+@@ -343,6 +397,11 @@ static void eventLoop(Display *display, struct aModules *modules) {
                      keypress_time = 0;
                  }
  
@@ -261,7 +284,7 @@ index e4cb32e..bce9fd2 100644
                  /* wait a bit */
                  usleep(25000);
                  continue;
-@@ -356,8 +395,14 @@ static void eventLoop(Display *display, struct aModules *modules) {
+@@ -356,8 +415,14 @@ static void eventLoop(Display *display, struct aModules *modules) {
                  setBacklightBrightness(0);
  #endif /* WITH_XBLIGHT */
  
@@ -278,7 +301,7 @@ index e4cb32e..bce9fd2 100644
  
  #if WITH_XBLIGHT
              /* restore original backlight brightness value */
-@@ -366,6 +411,8 @@ static void eventLoop(Display *display, struct aModules *modules) {
+@@ -366,6 +431,8 @@ static void eventLoop(Display *display, struct aModules *modules) {
  #endif /* WITH_XBLIGHT */
          }
  
