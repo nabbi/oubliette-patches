@@ -56,7 +56,7 @@ index f81d4dd..f60553c 100644
  if ENABLE_PAM
  alock_SOURCES += auth_pam.c
 diff --git a/src/main.c b/src/main.c
-index e4cb32e..7d23fe5 100644
+index e4cb32e..7113d1c 100644
 --- a/src/main.c
 +++ b/src/main.c
 @@ -11,12 +11,13 @@
@@ -183,7 +183,7 @@ index e4cb32e..7d23fe5 100644
  
      free(bgwins);
  
-@@ -317,6 +296,79 @@ static int lockDisplay(Display *display, struct aModules *modules) {
+@@ -317,6 +296,102 @@ static int lockDisplay(Display *display, struct aModules *modules) {
      return 0;
  }
  
@@ -260,10 +260,33 @@ index e4cb32e..7d23fe5 100644
 +    XSync(display, False);
 +}
 +
++/* Called each poll tick: detect resume via CLOCK_BOOTTIME jump, hide the
++ * cursor immediately, and fire the full repaint+show sequence 1500 ms later
++ * once the driver has had time to complete its own display restore. */
++static void pollResumeState(Display *display, struct aModules *modules,
++                            unsigned long *last_time,
++                            unsigned long *deferred_refresh_at) {
++    unsigned long now = alock_mtime();
++
++    if (now - *last_time > 500) {
++        int ns = ScreenCount(display);
++        for (int i = 0; i < ns; i++)
++            XFixesHideCursor(display, RootWindow(display, i));
++        *deferred_refresh_at = now + 1500;
++    }
++    *last_time = now;
++
++    if (*deferred_refresh_at && now >= *deferred_refresh_at) {
++        refreshCursorAfterResume(display, modules);
++        *deferred_refresh_at = 0;
++        *last_time = alock_mtime();
++    }
++}
++
  static void eventLoop(Display *display, struct aModules *modules) {
  
      XEvent ev;
-@@ -326,6 +378,8 @@ static void eventLoop(Display *display, struct aModules *modules) {
+@@ -326,6 +401,8 @@ static void eventLoop(Display *display, struct aModules *modules) {
      unsigned int clen;
      unsigned int pass_pos = 0, pass_len = 0;
      unsigned long keypress_time = 0;
@@ -272,33 +295,16 @@ index e4cb32e..7d23fe5 100644
  
      /* if possible do not page this address to the swap area */
      mlock(pass, sizeof(pass));
-@@ -343,6 +397,25 @@ static void eventLoop(Display *display, struct aModules *modules) {
+@@ -343,6 +420,8 @@ static void eventLoop(Display *display, struct aModules *modules) {
                      keypress_time = 0;
                  }
  
-+                unsigned long now = alock_mtime();
-+                if (now - last_time > 500) {
-+                    /* Resume detected: hide immediately so no artifact is visible
-+                     * while the display finishes reinitializing. The full refresh
-+                     * is deferred 1500 ms so the NVIDIA driver has time to complete
-+                     * its own VRAM restore before we repaint and show the cursor. */
-+                    int ns = ScreenCount(display);
-+                    for (int i = 0; i < ns; i++)
-+                        XFixesHideCursor(display, RootWindow(display, i));
-+                    deferred_refresh_at = alock_mtime() + 1500;
-+                }
-+                last_time = alock_mtime();
-+
-+                if (deferred_refresh_at && alock_mtime() >= deferred_refresh_at) {
-+                    refreshCursorAfterResume(display, modules);
-+                    deferred_refresh_at = 0;
-+                    last_time = alock_mtime();
-+                }
++                pollResumeState(display, modules, &last_time, &deferred_refresh_at);
 +
                  /* wait a bit */
                  usleep(25000);
                  continue;
-@@ -356,8 +429,25 @@ static void eventLoop(Display *display, struct aModules *modules) {
+@@ -356,8 +435,11 @@ static void eventLoop(Display *display, struct aModules *modules) {
                  setBacklightBrightness(0);
  #endif /* WITH_XBLIGHT */
  
@@ -306,27 +312,13 @@ index e4cb32e..7d23fe5 100644
 -            XMaskEvent(display, KeyPressMask | StructureNotifyMask, &ev);
 +            /* poll for events so resume can be detected via clock jump */
 +            while (XCheckMaskEvent(display, KeyPressMask | StructureNotifyMask, &ev) == False) {
-+                unsigned long now = alock_mtime();
-+                if (now - last_time > 500) {
-+                    int ns = ScreenCount(display);
-+                    for (int i = 0; i < ns; i++)
-+                        XFixesHideCursor(display, RootWindow(display, i));
-+                    deferred_refresh_at = alock_mtime() + 1500;
-+                }
-+                last_time = alock_mtime();
-+
-+                if (deferred_refresh_at && alock_mtime() >= deferred_refresh_at) {
-+                    refreshCursorAfterResume(display, modules);
-+                    deferred_refresh_at = 0;
-+                    last_time = alock_mtime();
-+                }
-+
++                pollResumeState(display, modules, &last_time, &deferred_refresh_at);
 +                usleep(100000);
 +            }
  
  #if WITH_XBLIGHT
              /* restore original backlight brightness value */
-@@ -366,6 +456,8 @@ static void eventLoop(Display *display, struct aModules *modules) {
+@@ -366,6 +448,8 @@ static void eventLoop(Display *display, struct aModules *modules) {
  #endif /* WITH_XBLIGHT */
          }
  
@@ -334,4 +326,19 @@ index e4cb32e..7d23fe5 100644
 +
          switch (ev.type) {
          case KeyPress:
+ 
+@@ -462,6 +546,14 @@ static void eventLoop(Display *display, struct aModules *modules) {
+ 
+                 if (rv == 0) { /* successful authentication */
+                     modules->input->setstate(AINPUT_STATE_VALID);
++                    /* Cursor may be hidden if auth succeeds during the deferred-
++                     * refresh window; restore it so the desktop session isn't
++                     * left with an invisible cursor. */
++                    if (deferred_refresh_at) {
++                        int ns = ScreenCount(display);
++                        for (int i = 0; i < ns; i++)
++                            XFixesShowCursor(display, RootWindow(display, i));
++                    }
+                     return;
+                 }
  
