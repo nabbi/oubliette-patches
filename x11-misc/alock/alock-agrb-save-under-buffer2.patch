@@ -56,7 +56,7 @@ index f81d4dd..f60553c 100644
  if ENABLE_PAM
  alock_SOURCES += auth_pam.c
 diff --git a/src/main.c b/src/main.c
-index e4cb32e..7113d1c 100644
+index e4cb32e..e43531b 100644
 --- a/src/main.c
 +++ b/src/main.c
 @@ -11,12 +11,13 @@
@@ -74,7 +74,15 @@ index e4cb32e..7113d1c 100644
  #include <stdlib.h>
  #include <string.h>
  #include <unistd.h>
-@@ -175,6 +176,38 @@ static void setBacklightBrightness(float value) {
+@@ -28,6 +29,7 @@
+ #include <X11/Xproto.h>
+ #include <X11/Xutil.h>
+ #include <X11/keysym.h>
++#include <stdint.h>
+ 
+ 
+ extern char **environ;
+@@ -175,6 +177,38 @@ static void setBacklightBrightness(float value) {
  }
  #endif /* WITH_XBLIGHT */
  
@@ -113,7 +121,7 @@ index e4cb32e..7113d1c 100644
  /* Lock current display and grab pointer and keyboard. On successful
   * lock this function returns 0, otherwise -1. */
  static int lockDisplay(Display *display, struct aModules *modules) {
-@@ -221,65 +254,11 @@ static int lockDisplay(Display *display, struct aModules *modules) {
+@@ -221,65 +255,11 @@ static int lockDisplay(Display *display, struct aModules *modules) {
       */
      XSync(display, False);
  
@@ -183,16 +191,19 @@ index e4cb32e..7113d1c 100644
  
      free(bgwins);
  
-@@ -317,6 +296,102 @@ static int lockDisplay(Display *display, struct aModules *modules) {
+@@ -317,6 +297,114 @@ static int lockDisplay(Display *display, struct aModules *modules) {
      return 0;
  }
  
 +/* On resume from suspend, hide the cursor via XFixes, reinitialize the cursor
-+ * hardware plane via an XRandR same-mode modeset, repaint all background
-+ * windows, wait for the repaint to land, then show the cursor again.
-+ * Modeset order matters: the hardware reinit must happen while the cursor is
-+ * hidden and before the clean framebuffer is presented, so ShowCursor forces
-+ * the driver to read fresh pixels rather than any cached sprite backing. */
++ * hardware plane via an XRandR same-mode modeset, then poll until the
++ * framebuffer is stable before showing the cursor again.
++ *
++ * Stability test: XGetImage without a compositor reads the actual hardware
++ * framebuffer.  If NVIDIA's async VRAM restore is still overwriting our
++ * XClearArea calls, consecutive samples will differ.  We loop (max 20 × 300 ms
++ * = 6 s) until two samples in a row agree, meaning the restore has finished
++ * and our clear has stuck. */
 +static void refreshCursorAfterResume(Display *display, struct aModules *modules) {
 +
 +    int nscreens = ScreenCount(display);
@@ -220,40 +231,49 @@ index e4cb32e..7113d1c 100644
 +    }
 +    XSync(display, False);
 +
-+    /* Discard stale paint events (including those from the modeset) so
-+     * waitForPaint sees only the fresh ones from the XClearArea calls below. */
-+    {
-+        XEvent drain_ev;
-+        while (XCheckMaskEvent(display, ExposureMask | VisibilityChangeMask, &drain_ev))
-+            ;
-+    }
-+
 +    for (int i = 0; i < nscreens; i++) {
 +        Window bg = modules->background->getwindow(i);
-+        if (bg != None) {
-+            XRaiseWindow(display, bg);
-+            /* XClearArea with exposures=True generates an Expose event for waitForPaint. */
-+            XClearArea(display, bg, 0, 0, 0, 0, True);
++        if (bg != None)
 +            bgwins[bgcount++] = bg;
++    }
++
++    if (bgcount == 0) {
++        usleep(2000000);
++    } else {
++        uint32_t prev_px = 0;
++        int have_prev = 0;
++
++        for (int attempt = 0; attempt < 20; attempt++) {
++            /* Drain stale paint events before each clear so waitForPaint
++             * only sees Expose events from the XClearArea calls below. */
++            XEvent drain_ev;
++            while (XCheckMaskEvent(display, ExposureMask | VisibilityChangeMask, &drain_ev))
++                ;
++
++            for (int i = 0; i < bgcount; i++) {
++                XRaiseWindow(display, bgwins[i]);
++                XClearArea(display, bgwins[i], 0, 0, 0, 0, True);
++            }
++            XSync(display, False);
++            waitForPaint(display, bgwins, bgcount, 500);
++
++            XImage *img = XGetImage(display, bgwins[0], 0, 0, 1, 1, AllPlanes, ZPixmap);
++            if (img) {
++                uint32_t px = (uint32_t)XGetPixel(img, 0, 0);
++                XDestroyImage(img);
++                if (have_prev && px == prev_px)
++                    break;  /* framebuffer stable: NVIDIA restore complete */
++                prev_px = px;
++                have_prev = 1;
++            }
++
++            usleep(300000);
 +        }
 +    }
 +
-+    XSync(display, False);
-+
-+    if (bgcount > 0) {
-+        waitForPaint(display, bgwins, bgcount, 1000);
-+        /* GPU fence: forces the server to finish rendering before we restore the cursor. */
-+        XImage *img = XGetImage(display, bgwins[0], 0, 0, 1, 1, AllPlanes, ZPixmap);
-+        if (img) XDestroyImage(img);
-+    } else {
-+        usleep(500000);
-+    }
-+
-+    /* GPU scanout settle time. */
++    /* GPU scanout settle. */
 +    usleep(100000);
 +
-+    /* Restore cursor: driver must re-read the framebuffer post-modeset reinit,
-+     * which now contains clean lock-screen pixels. */
 +    for (int i = 0; i < nscreens; i++)
 +        XFixesShowCursor(display, RootWindow(display, i));
 +
@@ -286,7 +306,7 @@ index e4cb32e..7113d1c 100644
  static void eventLoop(Display *display, struct aModules *modules) {
  
      XEvent ev;
-@@ -326,6 +401,8 @@ static void eventLoop(Display *display, struct aModules *modules) {
+@@ -326,6 +414,8 @@ static void eventLoop(Display *display, struct aModules *modules) {
      unsigned int clen;
      unsigned int pass_pos = 0, pass_len = 0;
      unsigned long keypress_time = 0;
@@ -295,7 +315,7 @@ index e4cb32e..7113d1c 100644
  
      /* if possible do not page this address to the swap area */
      mlock(pass, sizeof(pass));
-@@ -343,6 +420,8 @@ static void eventLoop(Display *display, struct aModules *modules) {
+@@ -343,6 +433,8 @@ static void eventLoop(Display *display, struct aModules *modules) {
                      keypress_time = 0;
                  }
  
@@ -304,7 +324,7 @@ index e4cb32e..7113d1c 100644
                  /* wait a bit */
                  usleep(25000);
                  continue;
-@@ -356,8 +435,11 @@ static void eventLoop(Display *display, struct aModules *modules) {
+@@ -356,8 +448,11 @@ static void eventLoop(Display *display, struct aModules *modules) {
                  setBacklightBrightness(0);
  #endif /* WITH_XBLIGHT */
  
@@ -318,7 +338,7 @@ index e4cb32e..7113d1c 100644
  
  #if WITH_XBLIGHT
              /* restore original backlight brightness value */
-@@ -366,6 +448,8 @@ static void eventLoop(Display *display, struct aModules *modules) {
+@@ -366,6 +461,8 @@ static void eventLoop(Display *display, struct aModules *modules) {
  #endif /* WITH_XBLIGHT */
          }
  
@@ -327,7 +347,7 @@ index e4cb32e..7113d1c 100644
          switch (ev.type) {
          case KeyPress:
  
-@@ -462,6 +546,14 @@ static void eventLoop(Display *display, struct aModules *modules) {
+@@ -462,6 +559,14 @@ static void eventLoop(Display *display, struct aModules *modules) {
  
                  if (rv == 0) { /* successful authentication */
                      modules->input->setstate(AINPUT_STATE_VALID);
