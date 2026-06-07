@@ -270,7 +270,7 @@ index 63e1ab5..2e93f89 100644
 +    module_getimage,
  };
 diff --git a/src/main.c b/src/main.c
-index e4cb32e..1d8e3ea 100644
+index e4cb32e..7887fde 100644
 --- a/src/main.c
 +++ b/src/main.c
 @@ -11,12 +11,14 @@
@@ -818,7 +818,7 @@ index e4cb32e..1d8e3ea 100644
                      return;
                  }
  
-@@ -734,8 +1038,22 @@ int main(int argc, char **argv) {
+@@ -734,8 +1038,35 @@ int main(int argc, char **argv) {
      if (lockDisplay(display, &modules))
          goto return_failure;
  
@@ -836,13 +836,26 @@ index e4cb32e..1d8e3ea 100644
 +        }
 +    }
 +
++    /* Stamp the cursor at the current pointer position so it is visible
++     * immediately without waiting for the first MotionNotify. */
++    if (swc) {
++        Window root_ret, child_ret;
++        int root_x, root_y, win_x, win_y;
++        unsigned int mask;
++        if (XQueryPointer(display, DefaultRootWindow(display),
++                          &root_ret, &child_ret,
++                          &root_x, &root_y, &win_x, &win_y, &mask))
++            swCursorMove(swc, root_x, root_y);
++        XFlush(display);
++    }
++
      debug("entering main event loop");
 -    eventLoop(display, &modules);
 +    eventLoop(display, &modules, swc);
  
      retval = EXIT_SUCCESS;
      goto return_success;
-@@ -745,6 +1063,7 @@ return_failure:
+@@ -745,6 +1076,7 @@ return_failure:
  
  return_success:
  
