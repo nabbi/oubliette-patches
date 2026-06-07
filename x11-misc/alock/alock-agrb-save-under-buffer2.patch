@@ -56,7 +56,7 @@ index f81d4dd..f60553c 100644
  if ENABLE_PAM
  alock_SOURCES += auth_pam.c
 diff --git a/src/main.c b/src/main.c
-index e4cb32e..55a5407 100644
+index e4cb32e..7d23fe5 100644
 --- a/src/main.c
 +++ b/src/main.c
 @@ -11,12 +11,13 @@
@@ -263,27 +263,42 @@ index e4cb32e..55a5407 100644
  static void eventLoop(Display *display, struct aModules *modules) {
  
      XEvent ev;
-@@ -326,6 +378,7 @@ static void eventLoop(Display *display, struct aModules *modules) {
+@@ -326,6 +378,8 @@ static void eventLoop(Display *display, struct aModules *modules) {
      unsigned int clen;
      unsigned int pass_pos = 0, pass_len = 0;
      unsigned long keypress_time = 0;
 +    unsigned long last_time = alock_mtime();
++    unsigned long deferred_refresh_at = 0;
  
      /* if possible do not page this address to the swap area */
      mlock(pass, sizeof(pass));
-@@ -343,6 +396,11 @@ static void eventLoop(Display *display, struct aModules *modules) {
+@@ -343,6 +397,25 @@ static void eventLoop(Display *display, struct aModules *modules) {
                      keypress_time = 0;
                  }
  
 +                unsigned long now = alock_mtime();
-+                if (now - last_time > 500)
-+                    refreshCursorAfterResume(display, modules);
++                if (now - last_time > 500) {
++                    /* Resume detected: hide immediately so no artifact is visible
++                     * while the display finishes reinitializing. The full refresh
++                     * is deferred 1500 ms so the NVIDIA driver has time to complete
++                     * its own VRAM restore before we repaint and show the cursor. */
++                    int ns = ScreenCount(display);
++                    for (int i = 0; i < ns; i++)
++                        XFixesHideCursor(display, RootWindow(display, i));
++                    deferred_refresh_at = alock_mtime() + 1500;
++                }
 +                last_time = alock_mtime();
++
++                if (deferred_refresh_at && alock_mtime() >= deferred_refresh_at) {
++                    refreshCursorAfterResume(display, modules);
++                    deferred_refresh_at = 0;
++                    last_time = alock_mtime();
++                }
 +
                  /* wait a bit */
                  usleep(25000);
                  continue;
-@@ -356,8 +414,14 @@ static void eventLoop(Display *display, struct aModules *modules) {
+@@ -356,8 +429,25 @@ static void eventLoop(Display *display, struct aModules *modules) {
                  setBacklightBrightness(0);
  #endif /* WITH_XBLIGHT */
  
@@ -292,15 +307,26 @@ index e4cb32e..55a5407 100644
 +            /* poll for events so resume can be detected via clock jump */
 +            while (XCheckMaskEvent(display, KeyPressMask | StructureNotifyMask, &ev) == False) {
 +                unsigned long now = alock_mtime();
-+                if (now - last_time > 500)
-+                    refreshCursorAfterResume(display, modules);
++                if (now - last_time > 500) {
++                    int ns = ScreenCount(display);
++                    for (int i = 0; i < ns; i++)
++                        XFixesHideCursor(display, RootWindow(display, i));
++                    deferred_refresh_at = alock_mtime() + 1500;
++                }
 +                last_time = alock_mtime();
++
++                if (deferred_refresh_at && alock_mtime() >= deferred_refresh_at) {
++                    refreshCursorAfterResume(display, modules);
++                    deferred_refresh_at = 0;
++                    last_time = alock_mtime();
++                }
++
 +                usleep(100000);
 +            }
  
  #if WITH_XBLIGHT
              /* restore original backlight brightness value */
-@@ -366,6 +430,8 @@ static void eventLoop(Display *display, struct aModules *modules) {
+@@ -366,6 +456,8 @@ static void eventLoop(Display *display, struct aModules *modules) {
  #endif /* WITH_XBLIGHT */
          }
  
