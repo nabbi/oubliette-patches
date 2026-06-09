@@ -16,42 +16,6 @@ index 5f45b5d..1333aab 100644
 +src/Makefile
 +src/.deps/
 +src/alock
-diff --git a/configure.ac b/configure.ac
-index d567372..7ceb143 100644
---- a/configure.ac
-+++ b/configure.ac
-@@ -21,6 +21,7 @@ AM_COND_IF([ENABLE_DEBUG], [
- 
- AC_SEARCH_LIBS([clock_gettime], [rt])
- PKG_CHECK_MODULES([X11], [x11])
-+PKG_CHECK_MODULES([XFIXES], [xfixes])
- 
- # check for the Misc X Extension library
- PKG_CHECK_MODULES([XEXT], [xext],
-diff --git a/src/Makefile.am b/src/Makefile.am
-index f81d4dd..7c16c2c 100644
---- a/src/Makefile.am
-+++ b/src/Makefile.am
-@@ -21,7 +21,8 @@ alock_CFLAGS = \
- 	@XEXT_CFLAGS@ \
- 	@XPM_CFLAGS@ \
- 	@XRENDER_CFLAGS@ \
--	@IMLIB2_CFLAGS@
-+	@IMLIB2_CFLAGS@ \
-+	@XFIXES_CFLAGS@
- 
- alock_LDADD = \
- 	@X11_LIBS@ \
-@@ -29,7 +30,8 @@ alock_LDADD = \
- 	@XEXT_LIBS@ \
- 	@XPM_LIBS@ \
- 	@XRENDER_LIBS@ \
--	@IMLIB2_LIBS@
-+	@IMLIB2_LIBS@ \
-+	@XFIXES_LIBS@
- 
- if ENABLE_PAM
- alock_SOURCES += auth_pam.c
 diff --git a/src/alock.h b/src/alock.h
 index 5e358d8..990a6a1 100644
 --- a/src/alock.h
@@ -267,14 +231,13 @@ index 63e1ab5..2e93f89 100644
 +    module_getimage,
  };
 diff --git a/src/main.c b/src/main.c
-index e4cb32e..c653410 100644
+index e4cb32e..dc4dc90 100644
 --- a/src/main.c
 +++ b/src/main.c
-@@ -11,12 +11,13 @@
+@@ -11,12 +11,12 @@
  
  #include "alock.h"
  
-+#include <X11/extensions/Xfixes.h>
 +#include <X11/extensions/Xrender.h>
  #include <ctype.h>
  #include <getopt.h>
@@ -285,7 +248,7 @@ index e4cb32e..c653410 100644
  #include <stdlib.h>
  #include <string.h>
  #include <unistd.h>
-@@ -28,10 +29,136 @@
+@@ -28,10 +28,136 @@
  #include <X11/Xproto.h>
  #include <X11/Xutil.h>
  #include <X11/keysym.h>
@@ -422,7 +385,7 @@ index e4cb32e..c653410 100644
  static struct aModuleAuth *alock_modules_auth[] = {
  #if ENABLE_PAM
      &alock_auth_pam,
-@@ -175,6 +302,38 @@ static void setBacklightBrightness(float value) {
+@@ -175,6 +301,38 @@ static void setBacklightBrightness(float value) {
  }
  #endif /* WITH_XBLIGHT */
  
@@ -461,7 +424,7 @@ index e4cb32e..c653410 100644
  /* Lock current display and grab pointer and keyboard. On successful
   * lock this function returns 0, otherwise -1. */
  static int lockDisplay(Display *display, struct aModules *modules) {
-@@ -221,87 +380,52 @@ static int lockDisplay(Display *display, struct aModules *modules) {
+@@ -221,87 +379,52 @@ static int lockDisplay(Display *display, struct aModules *modules) {
       */
      XSync(display, False);
  
@@ -586,53 +549,14 @@ index e4cb32e..c653410 100644
      /* try to grab 2 times, another process (windowmanager) may have grabbed
       * the keyboard already */
      if (XGrabKeyboard(display, window, True, GrabModeAsync, GrabModeAsync,
-@@ -317,7 +441,103 @@ static int lockDisplay(Display *display, struct aModules *modules) {
+@@ -317,7 +440,48 @@ static int lockDisplay(Display *display, struct aModules *modules) {
      return 0;
  }
  
 -static void eventLoop(Display *display, struct aModules *modules) {
-+static void refreshCursorAfterResume(Display *display, struct aModules *modules) {
-+
-+    int nscreens = ScreenCount(display);
-+    Window bgwins[nscreens];
-+    int bgcount = 0;
-+
-+    for (int i = 0; i < nscreens; i++)
-+        XFixesHideCursor(display, RootWindow(display, i));
-+
-+    for (int i = 0; i < nscreens; i++) {
-+        Window bg = modules->background->getwindow(i);
-+        if (bg != None)
-+            bgwins[bgcount++] = bg;
-+    }
-+
-+    /* Discard stale paint events so waitForPaint sees only fresh ones below. */
-+    {
-+        XEvent ev;
-+        while (XCheckMaskEvent(display, ExposureMask | VisibilityChangeMask, &ev))
-+            ;
-+    }
-+
-+    for (int i = 0; i < bgcount; i++) {
-+        XRaiseWindow(display, bgwins[i]);
-+        XClearArea(display, bgwins[i], 0, 0, 0, 0, True);
-+    }
-+    XSync(display, False);
-+    if (bgcount > 0)
-+        waitForPaint(display, bgwins, bgcount, 1000);
-+
-+    /* GPU scanout settle. */
-+    usleep(100000);
-+
-+    for (int i = 0; i < nscreens; i++)
-+        XFixesShowCursor(display, RootWindow(display, i));
-+
-+    XSync(display, False);
-+}
-+
 +/* Repaint bg windows and re-stamp the software cursor after resume.
-+ * No XFixes/XRandR needed: the hardware cursor is always blank, so NVIDIA's
-+ * VRAM restore cannot corrupt it.  We just need fresh bg pixels + a restamp. */
++ * The hardware cursor is always blank, so NVIDIA's VRAM restore cannot
++ * corrupt it.  We just need fresh bg pixels + a restamp. */
 +static void refreshSwCursorAfterResume(Display *display, struct aModules *modules,
 +                                       struct swCursor *swc) {
 +    int nscreens = ScreenCount(display);
@@ -655,35 +579,19 @@ index e4cb32e..c653410 100644
 +    XFlush(display);
 +}
 +
-+/* Called each poll tick: detect resume via CLOCK_BOOTTIME jump.
-+ * Software cursor path: repaint bg + restamp (deferred 1500 ms to let NVIDIA
-+ * finish its own restore before we clear over it).
-+ * Legacy path: hide cursor immediately, do full XFixes/XRandR refresh deferred. */
++/* Detect resume via CLOCK_BOOTTIME jump and refresh the software cursor.
++ * refreshSwCursorAfterResume contains its own waitForPaint, so no deferral
++ * is needed — it only fires for the software cursor path (non-image cursors
++ * are opaque and cannot show stale framebuffer content through transparency). */
 +static void pollResumeState(Display *display, struct aModules *modules,
 +                            struct swCursor *swc,
-+                            unsigned long *last_time,
-+                            unsigned long *deferred_refresh_at) {
++                            unsigned long *last_time) {
 +    unsigned long now = alock_mtime();
-+
-+    if (now - *last_time > 500) {
-+        if (!swc) {
-+            /* Legacy: hide hardware cursor immediately so no stale sprite shows. */
-+            int ns = ScreenCount(display);
-+            for (int i = 0; i < ns; i++)
-+                XFixesHideCursor(display, RootWindow(display, i));
-+        }
-+        *deferred_refresh_at = now + 1500;
++    if (now - *last_time > 500 && swc) {
++        refreshSwCursorAfterResume(display, modules, swc);
++        now = alock_mtime();
 +    }
 +    *last_time = now;
-+
-+    if (*deferred_refresh_at && now >= *deferred_refresh_at) {
-+        if (swc)
-+            refreshSwCursorAfterResume(display, modules, swc);
-+        else
-+            refreshCursorAfterResume(display, modules);
-+        *deferred_refresh_at = 0;
-+        *last_time = alock_mtime();
-+    }
 +}
 +
 +static void eventLoop(Display *display, struct aModules *modules,
@@ -691,16 +599,15 @@ index e4cb32e..c653410 100644
  
      XEvent ev;
      KeySym ks;
-@@ -326,6 +546,8 @@ static void eventLoop(Display *display, struct aModules *modules) {
+@@ -326,6 +490,7 @@ static void eventLoop(Display *display, struct aModules *modules) {
      unsigned int clen;
      unsigned int pass_pos = 0, pass_len = 0;
      unsigned long keypress_time = 0;
 +    unsigned long last_time = alock_mtime();
-+    unsigned long deferred_refresh_at = 0;
  
      /* if possible do not page this address to the swap area */
      mlock(pass, sizeof(pass));
-@@ -343,6 +565,15 @@ static void eventLoop(Display *display, struct aModules *modules) {
+@@ -343,6 +508,15 @@ static void eventLoop(Display *display, struct aModules *modules) {
                      keypress_time = 0;
                  }
  
@@ -711,12 +618,12 @@ index e4cb32e..c653410 100644
 +                        swCursorMove(swc, mev.xmotion.x, mev.xmotion.y);
 +                }
 +
-+                pollResumeState(display, modules, swc, &last_time, &deferred_refresh_at);
++                pollResumeState(display, modules, swc, &last_time);
 +
                  /* wait a bit */
                  usleep(25000);
                  continue;
-@@ -356,8 +587,18 @@ static void eventLoop(Display *display, struct aModules *modules) {
+@@ -356,8 +530,18 @@ static void eventLoop(Display *display, struct aModules *modules) {
                  setBacklightBrightness(0);
  #endif /* WITH_XBLIGHT */
  
@@ -731,13 +638,13 @@ index e4cb32e..c653410 100644
 +                    while (XCheckMaskEvent(display, PointerMotionMask, &mev))
 +                        swCursorMove(swc, mev.xmotion.x, mev.xmotion.y);
 +                }
-+                pollResumeState(display, modules, swc, &last_time, &deferred_refresh_at);
++                pollResumeState(display, modules, swc, &last_time);
 +                usleep(swc ? 16000 : 100000);
 +            }
  
  #if WITH_XBLIGHT
              /* restore original backlight brightness value */
-@@ -366,6 +607,8 @@ static void eventLoop(Display *display, struct aModules *modules) {
+@@ -366,6 +550,8 @@ static void eventLoop(Display *display, struct aModules *modules) {
  #endif /* WITH_XBLIGHT */
          }
  
@@ -746,22 +653,7 @@ index e4cb32e..c653410 100644
          switch (ev.type) {
          case KeyPress:
  
-@@ -462,6 +705,14 @@ static void eventLoop(Display *display, struct aModules *modules) {
- 
-                 if (rv == 0) { /* successful authentication */
-                     modules->input->setstate(AINPUT_STATE_VALID);
-+                    /* Legacy path: cursor may be hidden if auth succeeds during the
-+                     * deferred-refresh window; restore it so the desktop session
-+                     * isn't left with an invisible cursor. */
-+                    if (!swc && deferred_refresh_at) {
-+                        int ns = ScreenCount(display);
-+                        for (int i = 0; i < ns; i++)
-+                            XFixesShowCursor(display, RootWindow(display, i));
-+                    }
-                     return;
-                 }
- 
-@@ -487,18 +738,9 @@ static void eventLoop(Display *display, struct aModules *modules) {
+@@ -487,18 +673,9 @@ static void eventLoop(Display *display, struct aModules *modules) {
              break;
  
          case ConfigureNotify:
@@ -780,7 +672,7 @@ index e4cb32e..c653410 100644
          }
      }
  }
-@@ -734,8 +976,35 @@ int main(int argc, char **argv) {
+@@ -734,8 +911,35 @@ int main(int argc, char **argv) {
      if (lockDisplay(display, &modules))
          goto return_failure;
  
@@ -817,7 +709,7 @@ index e4cb32e..c653410 100644
  
      retval = EXIT_SUCCESS;
      goto return_success;
-@@ -745,6 +1014,7 @@ return_failure:
+@@ -745,6 +949,7 @@ return_failure:
  
  return_success:
  
