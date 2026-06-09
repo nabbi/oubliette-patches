@@ -267,7 +267,7 @@ index 63e1ab5..2e93f89 100644
 +    module_getimage,
  };
 diff --git a/src/main.c b/src/main.c
-index e4cb32e..3f9d97b 100644
+index e4cb32e..c653410 100644
 --- a/src/main.c
 +++ b/src/main.c
 @@ -11,12 +11,13 @@
@@ -285,7 +285,7 @@ index e4cb32e..3f9d97b 100644
  #include <stdlib.h>
  #include <string.h>
  #include <unistd.h>
-@@ -28,10 +29,137 @@
+@@ -28,10 +29,136 @@
  #include <X11/Xproto.h>
  #include <X11/Xutil.h>
  #include <X11/keysym.h>
@@ -357,9 +357,8 @@ index e4cb32e..3f9d97b 100644
 +
 +    XRenderPictFormat *bg_fmt = XRenderFindVisualFormat(dpy, DefaultVisual(dpy, screen));
 +
-+    /* IncludeInferiors so we can write over child windows (input frame). */
-+    XRenderPictureAttributes pa = { .subwindow_mode = IncludeInferiors };
-+    swc->bg_pic = XRenderCreatePicture(dpy, bg_win, bg_fmt, CPSubwindowMode, &pa);
++    /* ClipByChildren (default): stamp goes to bg_win only; the frame child sits on top. */
++    swc->bg_pic = XRenderCreatePicture(dpy, bg_win, bg_fmt, 0, NULL);
 +
 +    swc->gc = XCreateGC(dpy, bg_win, 0, NULL);
 +
@@ -423,7 +422,7 @@ index e4cb32e..3f9d97b 100644
  static struct aModuleAuth *alock_modules_auth[] = {
  #if ENABLE_PAM
      &alock_auth_pam,
-@@ -175,6 +303,38 @@ static void setBacklightBrightness(float value) {
+@@ -175,6 +302,38 @@ static void setBacklightBrightness(float value) {
  }
  #endif /* WITH_XBLIGHT */
  
@@ -462,7 +461,7 @@ index e4cb32e..3f9d97b 100644
  /* Lock current display and grab pointer and keyboard. On successful
   * lock this function returns 0, otherwise -1. */
  static int lockDisplay(Display *display, struct aModules *modules) {
-@@ -221,87 +381,52 @@ static int lockDisplay(Display *display, struct aModules *modules) {
+@@ -221,87 +380,52 @@ static int lockDisplay(Display *display, struct aModules *modules) {
       */
      XSync(display, False);
  
@@ -587,7 +586,7 @@ index e4cb32e..3f9d97b 100644
      /* try to grab 2 times, another process (windowmanager) may have grabbed
       * the keyboard already */
      if (XGrabKeyboard(display, window, True, GrabModeAsync, GrabModeAsync,
-@@ -317,7 +442,103 @@ static int lockDisplay(Display *display, struct aModules *modules) {
+@@ -317,7 +441,103 @@ static int lockDisplay(Display *display, struct aModules *modules) {
      return 0;
  }
  
@@ -692,7 +691,7 @@ index e4cb32e..3f9d97b 100644
  
      XEvent ev;
      KeySym ks;
-@@ -326,6 +547,8 @@ static void eventLoop(Display *display, struct aModules *modules) {
+@@ -326,6 +546,8 @@ static void eventLoop(Display *display, struct aModules *modules) {
      unsigned int clen;
      unsigned int pass_pos = 0, pass_len = 0;
      unsigned long keypress_time = 0;
@@ -701,7 +700,7 @@ index e4cb32e..3f9d97b 100644
  
      /* if possible do not page this address to the swap area */
      mlock(pass, sizeof(pass));
-@@ -343,6 +566,15 @@ static void eventLoop(Display *display, struct aModules *modules) {
+@@ -343,6 +565,15 @@ static void eventLoop(Display *display, struct aModules *modules) {
                      keypress_time = 0;
                  }
  
@@ -717,7 +716,7 @@ index e4cb32e..3f9d97b 100644
                  /* wait a bit */
                  usleep(25000);
                  continue;
-@@ -356,8 +588,18 @@ static void eventLoop(Display *display, struct aModules *modules) {
+@@ -356,8 +587,18 @@ static void eventLoop(Display *display, struct aModules *modules) {
                  setBacklightBrightness(0);
  #endif /* WITH_XBLIGHT */
  
@@ -738,7 +737,7 @@ index e4cb32e..3f9d97b 100644
  
  #if WITH_XBLIGHT
              /* restore original backlight brightness value */
-@@ -366,6 +608,8 @@ static void eventLoop(Display *display, struct aModules *modules) {
+@@ -366,6 +607,8 @@ static void eventLoop(Display *display, struct aModules *modules) {
  #endif /* WITH_XBLIGHT */
          }
  
@@ -747,7 +746,7 @@ index e4cb32e..3f9d97b 100644
          switch (ev.type) {
          case KeyPress:
  
-@@ -462,6 +706,14 @@ static void eventLoop(Display *display, struct aModules *modules) {
+@@ -462,6 +705,14 @@ static void eventLoop(Display *display, struct aModules *modules) {
  
                  if (rv == 0) { /* successful authentication */
                      modules->input->setstate(AINPUT_STATE_VALID);
@@ -762,7 +761,7 @@ index e4cb32e..3f9d97b 100644
                      return;
                  }
  
-@@ -487,18 +739,9 @@ static void eventLoop(Display *display, struct aModules *modules) {
+@@ -487,18 +738,9 @@ static void eventLoop(Display *display, struct aModules *modules) {
              break;
  
          case ConfigureNotify:
@@ -781,7 +780,7 @@ index e4cb32e..3f9d97b 100644
          }
      }
  }
-@@ -734,8 +977,35 @@ int main(int argc, char **argv) {
+@@ -734,8 +976,35 @@ int main(int argc, char **argv) {
      if (lockDisplay(display, &modules))
          goto return_failure;
  
@@ -818,7 +817,7 @@ index e4cb32e..3f9d97b 100644
  
      retval = EXIT_SUCCESS;
      goto return_success;
-@@ -745,6 +1015,7 @@ return_failure:
+@@ -745,6 +1014,7 @@ return_failure:
  
  return_success:
  
