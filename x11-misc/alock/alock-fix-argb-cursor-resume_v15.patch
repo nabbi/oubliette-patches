@@ -87,18 +87,10 @@ index 1df3f4f..8fa6e06 100644
 +    module_getimage,
  };
 diff --git a/src/cursor_image.c b/src/cursor_image.c
-index 83f7041..260bb6e 100644
+index 83f7041..ed2fbd5 100644
 --- a/src/cursor_image.c
 +++ b/src/cursor_image.c
-@@ -20,6 +20,7 @@
- #include <stdlib.h>
- #include <string.h>
- #include <X11/extensions/Xrender.h>
-+#include <stdint.h>
- #if ENABLE_IMLIB2
- # include <Imlib2.h>
- #elif ENABLE_XPM
-@@ -31,6 +32,8 @@ static struct moduleData {
+@@ -31,6 +31,8 @@ static struct moduleData {
      Display *display;
      char *filename;
      Cursor cursor;
@@ -107,7 +99,7 @@ index 83f7041..260bb6e 100644
  } data = { 0 };
  
  
-@@ -113,6 +116,14 @@ static int module_init(Display *dpy) {
+@@ -113,6 +115,14 @@ static int module_init(Display *dpy) {
  
                      XInitImage(&ximage);
  
@@ -122,7 +114,7 @@ index 83f7041..260bb6e 100644
                      cursor_pm = XCreatePixmap(dpy, RootWindowOfScreen(screen), w, h, 32);
                      gc = XCreateGC(dpy, cursor_pm, 0, 0);
                      XPutImage(dpy, cursor_pm, gc, &ximage, 0, 0, 0, 0, w, h);
-@@ -178,12 +189,18 @@ static void module_free() {
+@@ -178,12 +188,18 @@ static void module_free() {
  
      free(data.filename);
      data.filename = NULL;
@@ -141,7 +133,7 @@ index 83f7041..260bb6e 100644
  
  struct aModuleCursor alock_cursor_image = {
      { "image",
-@@ -193,4 +210,5 @@ struct aModuleCursor alock_cursor_image = {
+@@ -193,4 +209,5 @@ struct aModuleCursor alock_cursor_image = {
          module_free,
      },
      module_getcursor,
@@ -231,7 +223,7 @@ index 63e1ab5..2e93f89 100644
 +    module_getimage,
  };
 diff --git a/src/main.c b/src/main.c
-index e4cb32e..dc4dc90 100644
+index e4cb32e..2c61c29 100644
 --- a/src/main.c
 +++ b/src/main.c
 @@ -11,12 +11,12 @@
@@ -248,12 +240,7 @@ index e4cb32e..dc4dc90 100644
  #include <stdlib.h>
  #include <string.h>
  #include <unistd.h>
-@@ -28,10 +28,136 @@
- #include <X11/Xproto.h>
- #include <X11/Xutil.h>
- #include <X11/keysym.h>
-+#include <stdint.h>
- 
+@@ -32,6 +32,131 @@
  
  extern char **environ;
  
@@ -385,7 +372,7 @@ index e4cb32e..dc4dc90 100644
  static struct aModuleAuth *alock_modules_auth[] = {
  #if ENABLE_PAM
      &alock_auth_pam,
-@@ -175,6 +301,38 @@ static void setBacklightBrightness(float value) {
+@@ -175,6 +300,38 @@ static void setBacklightBrightness(float value) {
  }
  #endif /* WITH_XBLIGHT */
  
@@ -424,7 +411,7 @@ index e4cb32e..dc4dc90 100644
  /* Lock current display and grab pointer and keyboard. On successful
   * lock this function returns 0, otherwise -1. */
  static int lockDisplay(Display *display, struct aModules *modules) {
-@@ -221,87 +379,52 @@ static int lockDisplay(Display *display, struct aModules *modules) {
+@@ -221,87 +378,50 @@ static int lockDisplay(Display *display, struct aModules *modules) {
       */
      XSync(display, False);
  
@@ -509,9 +496,7 @@ index e4cb32e..dc4dc90 100644
 +    int use_swcursor = (modules->cursor->getimage() != NULL);
 +
 +    if (use_swcursor) {
-+        /* Software overlay path: grab with a blank hardware cursor and
-+         * PointerMotionMask so MotionNotify drives the software compositing.
-+         * No save-under on the hardware cursor → nothing for NVIDIA to corrupt. */
++        /* Blank hw cursor + PointerMotionMask: no save-under for NVIDIA to corrupt. */
 +        char no_data[8] = { 0 };
 +        XColor black = { 0 };
 +        Pixmap blank_pm = XCreateBitmapFromData(display, window, no_data, 8, 8);
@@ -549,14 +534,12 @@ index e4cb32e..dc4dc90 100644
      /* try to grab 2 times, another process (windowmanager) may have grabbed
       * the keyboard already */
      if (XGrabKeyboard(display, window, True, GrabModeAsync, GrabModeAsync,
-@@ -317,7 +440,48 @@ static int lockDisplay(Display *display, struct aModules *modules) {
+@@ -317,7 +437,43 @@ static int lockDisplay(Display *display, struct aModules *modules) {
      return 0;
  }
  
 -static void eventLoop(Display *display, struct aModules *modules) {
-+/* Repaint bg windows and re-stamp the software cursor after resume.
-+ * The hardware cursor is always blank, so NVIDIA's VRAM restore cannot
-+ * corrupt it.  We just need fresh bg pixels + a restamp. */
++/* Repaint bg windows and re-stamp software cursor; blank hw cursor means no NVIDIA sprite corruption. */
 +static void refreshSwCursorAfterResume(Display *display, struct aModules *modules,
 +                                       struct swCursor *swc) {
 +    int nscreens = ScreenCount(display);
@@ -579,10 +562,7 @@ index e4cb32e..dc4dc90 100644
 +    XFlush(display);
 +}
 +
-+/* Detect resume via CLOCK_BOOTTIME jump and refresh the software cursor.
-+ * refreshSwCursorAfterResume contains its own waitForPaint, so no deferral
-+ * is needed — it only fires for the software cursor path (non-image cursors
-+ * are opaque and cannot show stale framebuffer content through transparency). */
++/* Detect CLOCK_BOOTTIME jump → refresh sw cursor; no-op when swc is NULL (opaque cursors have no bleed-through). */
 +static void pollResumeState(Display *display, struct aModules *modules,
 +                            struct swCursor *swc,
 +                            unsigned long *last_time) {
@@ -599,7 +579,7 @@ index e4cb32e..dc4dc90 100644
  
      XEvent ev;
      KeySym ks;
-@@ -326,6 +490,7 @@ static void eventLoop(Display *display, struct aModules *modules) {
+@@ -326,6 +482,7 @@ static void eventLoop(Display *display, struct aModules *modules) {
      unsigned int clen;
      unsigned int pass_pos = 0, pass_len = 0;
      unsigned long keypress_time = 0;
@@ -607,7 +587,7 @@ index e4cb32e..dc4dc90 100644
  
      /* if possible do not page this address to the swap area */
      mlock(pass, sizeof(pass));
-@@ -343,6 +508,15 @@ static void eventLoop(Display *display, struct aModules *modules) {
+@@ -343,6 +500,15 @@ static void eventLoop(Display *display, struct aModules *modules) {
                      keypress_time = 0;
                  }
  
@@ -623,7 +603,7 @@ index e4cb32e..dc4dc90 100644
                  /* wait a bit */
                  usleep(25000);
                  continue;
-@@ -356,8 +530,18 @@ static void eventLoop(Display *display, struct aModules *modules) {
+@@ -356,8 +522,17 @@ static void eventLoop(Display *display, struct aModules *modules) {
                  setBacklightBrightness(0);
  #endif /* WITH_XBLIGHT */
  
@@ -631,8 +611,7 @@ index e4cb32e..dc4dc90 100644
 -            XMaskEvent(display, KeyPressMask | StructureNotifyMask, &ev);
 +            /* poll for events so resume can be detected via clock jump */
 +            while (XCheckMaskEvent(display, KeyPressMask | StructureNotifyMask, &ev) == False) {
-+                /* Drain pending motion events so the software cursor tracks the pointer.
-+                 * Use a shorter sleep (~60 fps) so movement feels smooth. */
++                /* Drain motion events; shorter sleep for smooth cursor movement. */
 +                if (swc) {
 +                    XEvent mev;
 +                    while (XCheckMaskEvent(display, PointerMotionMask, &mev))
@@ -644,7 +623,7 @@ index e4cb32e..dc4dc90 100644
  
  #if WITH_XBLIGHT
              /* restore original backlight brightness value */
-@@ -366,6 +550,8 @@ static void eventLoop(Display *display, struct aModules *modules) {
+@@ -366,6 +541,8 @@ static void eventLoop(Display *display, struct aModules *modules) {
  #endif /* WITH_XBLIGHT */
          }
  
@@ -653,25 +632,6 @@ index e4cb32e..dc4dc90 100644
          switch (ev.type) {
          case KeyPress:
  
-@@ -487,18 +673,9 @@ static void eventLoop(Display *display, struct aModules *modules) {
-             break;
- 
-         case ConfigureNotify:
--            /* NOTE: This event should be generated for the root window upon
--             *       the display reconfiguration (e.g. resolution change). */
--
-             debug("received configure notify event");
-             break;
- 
--#if 0
--        case Expose:
--            XClearWindow(dpy, ((XExposeEvent*)&ev)->window);
--            break;
--#endif
--
-         }
-     }
- }
 @@ -734,8 +911,35 @@ int main(int argc, char **argv) {
      if (lockDisplay(display, &modules))
          goto return_failure;
