@@ -1,0 +1,119 @@
+# https://github.com/jbeverly/pam_ssh_agent_auth/issues/17
+# Remove the allow_user_owned_authorized_keys_file option (privilege escalation)
+#
+# This module option allows an authorized_keys file outside the target
+# user's home directory to be accepted even if it is owned by that user
+# instead of root. When this module is used to gate local
+# re-authentication (su, sudo, passwd, chfn, etc., where PAM_RUSER ==
+# PAM_USER), a user can simply append a freshly generated key to a file
+# they already own, load the matching private key into their own
+# ssh-agent, and authenticate as themselves -- defeating the PAM check
+# entirely (equivalent to NOPASSWD).
+#
+# ~/.ssh/authorized_keys and %h-expanded paths are unaffected by this
+# patch: they already require the file to be owned by the user being
+# authenticated, independent of this flag. Any config that relied on
+# allow_user_owned_authorized_keys_file for a *non*-home-directory path
+# will now require that file to be root-owned (fails closed).
+#
+diff --git a/pam_ssh_agent_auth.c b/pam_ssh_agent_auth.c
+index 1af81f5..51ceb4e 100644
+--- a/pam_ssh_agent_auth.c
++++ b/pam_ssh_agent_auth.c
+@@ -63,7 +63,6 @@
+ #define UNUSED(expr) do { (void)(expr); } while (0)
+ 
+ char           *authorized_keys_file = NULL;
+-uint8_t         allow_user_owned_authorized_keys_file = 0;
+ char           *authorized_keys_command = NULL;
+ char           *authorized_keys_command_user = NULL;
+ 
+@@ -113,9 +112,6 @@ pam_sm_authenticate(pam_handle_t * pamh, int flags, int argc, const char **argv)
+         if(strncasecmp_literal(*argv_ptr, "debug") == 0) {
+             log_lvl = SYSLOG_LEVEL_DEBUG3;
+         }
+-        if(strncasecmp_literal(*argv_ptr, "allow_user_owned_authorized_keys_file")  == 0) {
+-            allow_user_owned_authorized_keys_file = 1;
+-        }
+         if(strncasecmp_literal(*argv_ptr, "file=") == 0 ) {
+             authorized_keys_file_input = *argv_ptr + sizeof("file=") - 1;
+         }
+diff --git a/pam_ssh_agent_auth.pod b/pam_ssh_agent_auth.pod
+index b6a3792..24cdb49 100644
+--- a/pam_ssh_agent_auth.pod
++++ b/pam_ssh_agent_auth.pod
+@@ -59,11 +59,6 @@ This configuration would permit anyone who originally authenticated to sshd with
+ 
+ Specify the path to the authorized_keys file(s) you would like to use for authentication. Subject to tilde and % EXPANSIONS (below) 
+ 
+-=item allow_user_owned_authorized_keys_file
+-
+-A flag which enables authorized_keys files to be owned by the invoking user, instead of root. This flag is enabled automatically whenever
+-the expansions %h or ~ are used.
+-
+ =item authorized_keys_command=<path to executable>
+ 
+ Specify an external command to run, which should take a single argument, the username of the person being authenticated, and emit to its stdout a file in authorized_keys format.
+@@ -95,11 +90,11 @@ This defaults to "sudo".
+ 
+ =item ~  -- same as in shells, a user's Home directory
+ 
+-Automatically enables allow_user_owned_authorized_keys_file if used in the context of ~/. If used as ~user/, it would expect the file to be owned by 'user', unless you explicitly set allow_user_owned_authorized_keys_file
++If used as ~/, the authorized_keys file must be owned by the user being authenticated. If used as ~user/, the file must be owned by 'user'.
+ 
+ =item %h -- User's Home directory
+ 
+-Automatically enables allow_user_owned_authorized_keys_file
++The authorized_keys file must be owned by the user being authenticated.
+ 
+ =item %H -- The short-hostname
+ 
+@@ -126,22 +121,13 @@ Same as above.
+ =item C<auth sufficient pam_ssh_agent_auth.so file=~fred/.ssh/authorized_keys>
+ 
+ If the home-directory of user 'fred' was /home/fred, this would expand to /home/fred/.ssh/authorized_keys.
+-In this case, we have not specified allow_user_owned_authorized_keys_file, 
+-so this file must be owned by 'fred'.
+-
+-=item C<auth sufficient pam_ssh_agent_auth.so file=/secure/%H/%u/authorized_keys allow_user_owned_authorized_keys_file>
+-
+-On a host named foobar.baz.com, and a user named fred,
+-would expand to /secure/foobar/fred/authorized_keys.
+-In this case, we specified allow_user_owned_authorized_keys_file, 
+-so fred would be able to manage that authorized_keys file himself. 
++This file must be owned by 'fred'.
+ 
+ =item C<auth sufficient pam_ssh_agent_auth.so file=/secure/%f/%u/authorized_keys>
+ 
+-On a host named foobar.baz.com, and a user named fred, 
++On a host named foobar.baz.com, and a user named fred,
+ would expand to /secure/foobar.baz.com/fred/authorized_keys.
+-In this case, we have not specified allow_user_owned_authorized_keys_file, 
+-so this file must be owned by root.
++This file must be owned by root.
+ 
+ =item C<auth [success=3 default=ignore] pam_ssh_agent_auth.so file=~/.ssh/authorized_keys debug>
+ 
+diff --git a/pam_user_authorized_keys.c b/pam_user_authorized_keys.c
+index abe7a15..4e8e647 100644
+--- a/pam_user_authorized_keys.c
++++ b/pam_user_authorized_keys.c
+@@ -86,8 +86,6 @@ extern char *authorized_keys_command;
+ 
+ extern char *authorized_keys_command_user;
+ 
+-extern uint8_t allow_user_owned_authorized_keys_file;
+-
+ uid_t authorized_keys_file_allowed_owner_uid;
+ 
+ void
+@@ -108,9 +106,6 @@ parse_authorized_key_file(const char *user,
+     strncat(auth_keys_file_buf, authorized_keys_file_input,
+             sizeof(auth_keys_file_buf) - 1);
+ 
+-    if(allow_user_owned_authorized_keys_file)
+-        authorized_keys_file_allowed_owner_uid = getpwnam(user)->pw_uid;
+-
+     if(*auth_keys_file_buf == '~') {
+         if(*(auth_keys_file_buf + 1) == '/') {
+             authorized_keys_file_allowed_owner_uid = getpwnam(user)->pw_uid;
