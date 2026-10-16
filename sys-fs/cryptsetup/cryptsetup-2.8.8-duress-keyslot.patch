@@ -1,0 +1,104 @@
+From f4df2b6eeeb8d3e30fccfb37887be23809320e0b Mon Sep 17 00:00:00 2001
+From: Nic Boet <nic@boet.cc>
+Date: Thu, 15 Oct 2026 23:19:08 -0500
+Subject: [PATCH] cryptsetup: add LUKS2 duress keyslot
+
+If a passphrase fails to unlock the device but opens an unbound LUKS2
+keyslot 31, overwrite the key material of every keyslot with random data
+and report an ordinary wrong passphrase. Keyslot metadata is kept, so all
+later attempts fail identically; recovery requires a header backup.
+
+An explicit --key-slot never triggers this, so the duress passphrase can
+be checked with: open --test-passphrase --key-slot 31.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ man/cryptsetup-open.8.adoc |  8 +++++++
+ src/cryptsetup.c           | 45 ++++++++++++++++++++++++++++++++++++++
+ 2 files changed, 53 insertions(+)
+
+diff --git a/man/cryptsetup-open.8.adoc b/man/cryptsetup-open.8.adoc
+index 90e8b0fd..84fc3937 100644
+--- a/man/cryptsetup-open.8.adoc
++++ b/man/cryptsetup-open.8.adoc
+@@ -74,6 +74,14 @@ If such a token does not exist (or fails to unlock keyslot) and the passphrase i
+ If there is a valid LUKS2 token but it requires a PIN to unlock the assigned keyslot, it is not used unless one of the following options is added: --token-only,
+ --token-type where type matches the desired PIN-protected token or --token-id with id matching the PIN-protected token.
+ 
++*Duress keyslot (LUKS2, patched build).* If keyslot 31 is an *unbound* keyslot and a passphrase (or key file) that fails to unlock the device opens it, the key material of every keyslot is overwritten with random data and the usual "No key available with this passphrase." error is printed.
++Keyslot metadata is kept, so from then on every passphrase fails the same way; the volume key is only recoverable from a header backup (see *cryptsetup luksHeaderRestore*).
++Create the duress keyslot with:
++
++  cryptsetup luksAddKey --unbound --key-size 256 --key-slot 31 <device>
++
++Opening with an explicit --key-slot never triggers the duress action, so the duress passphrase can be checked safely with *open --test-passphrase --key-slot 31*.
++
+ *<options>* can be [--key-file, --keyfile-offset, --keyfile-size, --readonly, --test-passphrase, --allow-discards, --header, --key-slot, --volume-key-file, --token-id, --token-only, --token-type, --disable-external-tokens, --disable-keyring, --disable-locks, --type, --refresh, --serialize-memory-hard-pbkdf, --unbound, --tries, --timeout, --verify-passphrase, --persistent, --volume-key-keyring, --link-vk-to-keyring, --external-tokens-path].
+ 
+ === loopAES
+diff --git a/src/cryptsetup.c b/src/cryptsetup.c
+index 0d36e3b5..4eb10f5e 100644
+--- a/src/cryptsetup.c
++++ b/src/cryptsetup.c
+@@ -1752,6 +1752,47 @@ static int action_luksFormat(void)
+ 	return luksFormat(NULL, NULL);
+ }
+ 
++#ifndef DURESS_KEYSLOT
++#define DURESS_KEYSLOT 31
++#endif
++
++/*
++ * Duress keyslot: an unbound LUKS2 keyslot at DURESS_KEYSLOT. If the secret in kc
++ * failed to unlock the device but opens that keyslot, overwrite the key material
++ * of every keyslot with random data. Keyslot metadata is left in place, so from
++ * then on every passphrase fails as an ordinary wrong passphrase.
++ * Always returns -EPERM so the caller reports exactly that.
++ */
++static int luks_duress_check(struct crypt_device *cd, struct crypt_keyslot_context *kc)
++{
++	crypt_keyslot_info ki;
++	uint64_t offset, length;
++	int i, max;
++
++	if (!isLUKS2(crypt_get_type(cd)) ||
++	    crypt_keyslot_status(cd, DURESS_KEYSLOT) != CRYPT_SLOT_UNBOUND)
++		return -EPERM;
++
++	if (crypt_activate_by_keyslot_context(cd, NULL, DURESS_KEYSLOT, kc, CRYPT_ANY_SLOT, NULL,
++					      CRYPT_ACTIVATE_ALLOW_UNBOUND_KEY) != DURESS_KEYSLOT)
++		return -EPERM;
++
++	max = crypt_keyslot_max(CRYPT_LUKS2);
++	for (i = 0; i < max; i++) {
++		ki = crypt_keyslot_status(cd, i);
++		if (ki != CRYPT_SLOT_ACTIVE && ki != CRYPT_SLOT_ACTIVE_LAST &&
++		    ki != CRYPT_SLOT_UNBOUND)
++			continue;
++		if (crypt_keyslot_area(cd, i, &offset, &length) < 0 ||
++		    crypt_wipe(cd, crypt_get_metadata_device_name(cd), CRYPT_WIPE_RANDOM,
++			       offset, length, 0, CRYPT_WIPE_NO_DIRECT_IO, NULL, NULL) < 0)
++			/* Fall back to removing the keyslot altogether. */
++			(void)crypt_keyslot_destroy(cd, i);
++	}
++
++	return -EPERM;
++}
++
+ static int action_open_luks(void)
+ {
+ 	struct crypt_active_device cad;
+@@ -1876,6 +1917,10 @@ static int action_open_luks(void)
+ 			r = crypt_activate_by_keyslot_context(cd, activated_name, ARG_INT32(OPT_KEY_SLOT_ID),
+ 							      kc1, CRYPT_ANY_SLOT, kc1, activate_flags);
+ 
++			/* An explicit --key-slot never triggers duress, so it can be tested safely. */
++			if (r == -EPERM && ARG_INT32(OPT_KEY_SLOT_ID) == CRYPT_ANY_SLOT)
++				r = luks_duress_check(cd, kc1);
++
+ 			tools_keyslot_msg(r, UNLOCKED);
+ 			tools_passphrase_msg(r);
+ 			check_signal(&r);
+-- 
+2.55.0
+
