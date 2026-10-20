@@ -235,7 +235,7 @@ index 63e1ab5..2e93f89 100644
 +    module_getimage,
  };
 diff --git a/src/main.c b/src/main.c
-index e4cb32e..9c70640 100644
+index e4cb32e..8cdbf59 100644
 --- a/src/main.c
 +++ b/src/main.c
 @@ -10,13 +10,13 @@
@@ -261,7 +261,7 @@ index e4cb32e..9c70640 100644
  static struct aModuleAuth *alock_modules_auth[] = {
  #if ENABLE_PAM
      &alock_auth_pam,
-@@ -175,6 +176,38 @@ static void setBacklightBrightness(float value) {
+@@ -175,6 +176,43 @@ static void setBacklightBrightness(float value) {
  }
  #endif /* WITH_XBLIGHT */
  
@@ -297,10 +297,15 @@ index e4cb32e..9c70640 100644
 +    }
 +}
 +
++/* Software cursor needs image data from the cursor module and XRender at runtime. */
++static int useSwCursor(Display *display, struct aModules *modules) {
++    return modules->cursor->getimage() != NULL && alock_check_xrender(display);
++}
++
  /* Lock current display and grab pointer and keyboard. On successful
   * lock this function returns 0, otherwise -1. */
  static int lockDisplay(Display *display, struct aModules *modules) {
-@@ -215,93 +248,53 @@ static int lockDisplay(Display *display, struct aModules *modules) {
+@@ -215,93 +253,51 @@ static int lockDisplay(Display *display, struct aModules *modules) {
          XSelectInput(display, RootWindow(display, i), StructureNotifyMask);
      }
  
@@ -389,9 +394,7 @@ index e4cb32e..9c70640 100644
 -                None, CurrentTime) != GrabSuccess) {
 -        fprintf(stderr, "error: grab pointer failed\n");
 -        return -1;
-+    int use_swcursor = (modules->cursor->getimage() != NULL);
-+
-+    if (use_swcursor) {
++    if (useSwCursor(display, modules)) {
 +        /* Blank hw cursor + PointerMotionMask: no save-under for NVIDIA to corrupt. */
 +        char no_data[8] = { 0 };
 +        XColor black = { 0 };
@@ -430,7 +433,7 @@ index e4cb32e..9c70640 100644
      /* try to grab 2 times, another process (windowmanager) may have grabbed
       * the keyboard already */
      if (XGrabKeyboard(display, window, True, GrabModeAsync, GrabModeAsync,
-@@ -317,7 +310,53 @@ static int lockDisplay(Display *display, struct aModules *modules) {
+@@ -317,7 +313,53 @@ static int lockDisplay(Display *display, struct aModules *modules) {
      return 0;
  }
  
@@ -485,7 +488,7 @@ index e4cb32e..9c70640 100644
  
      XEvent ev;
      KeySym ks;
-@@ -326,6 +365,7 @@ static void eventLoop(Display *display, struct aModules *modules) {
+@@ -326,6 +368,7 @@ static void eventLoop(Display *display, struct aModules *modules) {
      unsigned int clen;
      unsigned int pass_pos = 0, pass_len = 0;
      unsigned long keypress_time = 0;
@@ -493,7 +496,7 @@ index e4cb32e..9c70640 100644
  
      /* if possible do not page this address to the swap area */
      mlock(pass, sizeof(pass));
-@@ -343,6 +383,20 @@ static void eventLoop(Display *display, struct aModules *modules) {
+@@ -343,6 +386,20 @@ static void eventLoop(Display *display, struct aModules *modules) {
                      keypress_time = 0;
                  }
  
@@ -514,16 +517,16 @@ index e4cb32e..9c70640 100644
                  /* wait a bit */
                  usleep(25000);
                  continue;
-@@ -356,8 +410,22 @@ static void eventLoop(Display *display, struct aModules *modules) {
+@@ -356,8 +413,25 @@ static void eventLoop(Display *display, struct aModules *modules) {
                  setBacklightBrightness(0);
  #endif /* WITH_XBLIGHT */
  
 -            /* block until any key press event arrives */
 -            XMaskEvent(display, KeyPressMask | StructureNotifyMask, &ev);
-+            /* poll for events so resume can be detected via clock jump */
-+            while (XCheckMaskEvent(display, KeyPressMask | StructureNotifyMask, &ev) == False) {
-+                /* Drain motion and Expose events; restamp cursor if bg was repainted. */
-+                if (swc) {
++            if (swc) {
++                /* poll for events so resume can be detected via clock jump */
++                while (XCheckMaskEvent(display, KeyPressMask | StructureNotifyMask, &ev) == False) {
++                    /* Drain motion and Expose events; restamp cursor if bg was repainted. */
 +                    XEvent mev;
 +                    while (XCheckMaskEvent(display, PointerMotionMask, &mev))
 +                        swCursorMove(swc, mev.xmotion.x, mev.xmotion.y);
@@ -532,14 +535,17 @@ index e4cb32e..9c70640 100644
 +                        need_restamp = 1;
 +                    if (need_restamp)
 +                        swCursorRestamp(swc);
++                    pollResumeState(display, modules, swc, &last_time);
++                    usleep(16000);
 +                }
-+                pollResumeState(display, modules, swc, &last_time);
-+                usleep(swc ? 16000 : 100000);
 +            }
++            else
++                /* no software cursor, nothing to refresh on resume */
++                XMaskEvent(display, KeyPressMask | StructureNotifyMask, &ev);
  
  #if WITH_XBLIGHT
              /* restore original backlight brightness value */
-@@ -366,6 +434,8 @@ static void eventLoop(Display *display, struct aModules *modules) {
+@@ -366,6 +440,8 @@ static void eventLoop(Display *display, struct aModules *modules) {
  #endif /* WITH_XBLIGHT */
          }
  
@@ -548,7 +554,7 @@ index e4cb32e..9c70640 100644
          switch (ev.type) {
          case KeyPress:
  
-@@ -493,12 +563,6 @@ static void eventLoop(Display *display, struct aModules *modules) {
+@@ -493,12 +569,6 @@ static void eventLoop(Display *display, struct aModules *modules) {
              debug("received configure notify event");
              break;
  
@@ -561,21 +567,30 @@ index e4cb32e..9c70640 100644
          }
      }
  }
-@@ -734,8 +798,35 @@ int main(int argc, char **argv) {
+@@ -518,6 +588,7 @@ int main(int argc, char **argv) {
+ 
+     Display *display;
+     struct aModules modules;
++    struct swCursor *swc = NULL;
+     int retval;
+ 
+     const char *args_auth = NULL;
+@@ -734,8 +805,36 @@ int main(int argc, char **argv) {
      if (lockDisplay(display, &modules))
          goto return_failure;
  
 +    /* If the cursor module provides image data, set up the software overlay
 +     * on the primary screen's background window. */
-+    struct swCursor *swc = NULL;
-+    {
-+        const struct aCursorImage *img = modules.cursor->getimage();
-+        if (img) {
-+            Window bg0 = modules.background->getwindow(0);
-+            if (bg0 != None)
-+                swc = swCursorCreate(display, bg0, img);
-+            if (!swc)
-+                fprintf(stderr, "alock: software cursor setup failed, using hardware cursor\n");
++    if (useSwCursor(display, &modules)) {
++        Window bg0 = modules.background->getwindow(0);
++        if (bg0 != None)
++            swc = swCursorCreate(display, bg0, modules.cursor->getimage());
++        if (!swc) {
++            /* Pointer is grabbed with a blank cursor; swap in the module
++             * cursor and drop PointerMotionMask. */
++            XChangeActivePointerGrab(display, 0,
++                    modules.cursor->getcursor(), CurrentTime);
++            fprintf(stderr, "alock: software cursor setup failed, using hardware cursor\n");
 +        }
 +    }
 +
@@ -598,7 +613,7 @@ index e4cb32e..9c70640 100644
  
      retval = EXIT_SUCCESS;
      goto return_success;
-@@ -745,6 +836,7 @@ return_failure:
+@@ -745,6 +844,7 @@ return_failure:
  
  return_success:
  
@@ -775,7 +790,7 @@ index 0000000..1a42630
 +#endif /* ENABLE_XRENDER */
 diff --git a/src/sw_cursor.h b/src/sw_cursor.h
 new file mode 100644
-index 0000000..744d934
+index 0000000..129afc4
 --- /dev/null
 +++ b/src/sw_cursor.h
 @@ -0,0 +1,28 @@
@@ -796,7 +811,7 @@ index 0000000..744d934
 +#include <X11/Xlib.h>
 +#include "alock.h"
 +
-+/* Opaque software cursor overlay state. */
++/* Software cursor overlay state (opaque handle, defined in sw_cursor.c). */
 +struct swCursor;
 +
 +struct swCursor *swCursorCreate(Display *dpy, Window bg_win,
