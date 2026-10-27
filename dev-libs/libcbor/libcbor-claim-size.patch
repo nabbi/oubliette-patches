@@ -1,0 +1,346 @@
+diff --git a/src/cbor.c b/src/cbor.c
+index 276e2cd..9c2cd05 100644
+--- a/src/cbor.c
++++ b/src/cbor.c
+@@ -56,13 +56,18 @@ cbor_item_t* cbor_load(cbor_data source, size_t source_size,
+ 
+   /* Target for callbacks */
+   struct _cbor_decoder_context context = (struct _cbor_decoder_context){
+-      .stack = &stack, .creation_failed = false, .syntax_error = false};
++      .stack = &stack,
++      .creation_failed = false,
++      .syntax_error = false,
++      .source_size = source_size,
++      .owed = 0};
+   struct cbor_decoder_result decode_result;
+   *result =
+       (struct cbor_load_result){.read = 0, .error = {.code = CBOR_ERR_NONE}};
+ 
+   do {
+     if (source_size > result->read) { /* Check for overflows */
++      context.remaining = source_size - result->read;
+       decode_result =
+           cbor_stream_decode(source + result->read, source_size - result->read,
+                              &callbacks, &context);
+diff --git a/src/cbor/internal/builder_callbacks.c b/src/cbor/internal/builder_callbacks.c
+index 97b2560..d9b0cf1 100644
+--- a/src/cbor/internal/builder_callbacks.c
++++ b/src/cbor/internal/builder_callbacks.c
+@@ -15,8 +15,65 @@
+ #include "../maps.h"
+ #include "../strings.h"
+ #include "../tags.h"
++#include "memory_utils.h"
+ #include "unicode.h"
+ 
++/**
++ * Every subitem of a definite array or map takes at least one byte, so an
++ * open definite container with `subitems` items left needs `subitems - 1`
++ * bytes beyond the item in progress in it (that item is either the one being
++ * decoded or the container above it, and its bytes are counted there).
++ * Indefinite containers and tags need nothing. Clamping to the input size
++ * keeps the running total from overflowing without changing any comparison
++ * against `remaining`.
++ */
++static uint64_t _cbor_owed(const struct _cbor_decoder_context* ctx,
++                           size_t subitems) {
++  if (subitems == 0) return 0;
++  return subitems - 1 < ctx->source_size ? subitems - 1 : ctx->source_size;
++}
++
++/** Record that the top container received one of its subitems. */
++static void _cbor_owed_decrement(struct _cbor_decoder_context* ctx) {
++  size_t subitems = ctx->stack->top->subitems;
++  ctx->owed -= _cbor_owed(ctx, subitems) - _cbor_owed(ctx, subitems - 1);
++  ctx->stack->top->subitems--;
++}
++
++/**
++ * How many subitems the input can still hold for a container whose header is
++ * being decoded: the bytes left after its header, minus what the enclosing
++ * containers still need.
++ */
++static size_t _cbor_claim_budget(const struct _cbor_decoder_context* ctx) {
++  uint64_t after_header = ctx->remaining - 1;
++  return ctx->owed < after_header ? (size_t)(after_header - ctx->owed) : 0;
++}
++
++/**
++ * Make room for one more item in a definite array or map whose header
++ * claimed more items than the input could hold (see
++ * `cbor_builder_array_start_callback`). Grows geometrically, but never past
++ * the claimed size, so storage stays proportional to the items that actually
++ * arrive. `left` is the number of items (pairs, for maps) still expected,
++ * including the one being added.
++ */
++static bool _cbor_builder_grow(cbor_item_t* item, size_t item_size,
++                               size_t* allocated, size_t end_ptr,
++                               size_t left) {
++  size_t wanted = *allocated == 0 ? 1 : *allocated;
++  if (*allocated > 0 && _cbor_safe_to_multiply(CBOR_BUFFER_GROWTH, wanted))
++    wanted *= CBOR_BUFFER_GROWTH;
++  if (wanted - end_ptr > left) wanted = end_ptr + left;
++  unsigned char* data = _cbor_realloc_multiple(item->data, item_size, wanted);
++  if (data == NULL) return false;
++  memset(data + item_size * *allocated, 0,
++         item_size * (wanted - *allocated));
++  item->data = data;
++  *allocated = wanted;
++  return true;
++}
++
+ // `_cbor_builder_append` takes ownership of `item`. If adding the item to
+ // parent container fails, `item` will be deallocated to prevent memory.
+ void _cbor_builder_append(cbor_item_t* item,
+@@ -37,15 +94,23 @@ void _cbor_builder_append(cbor_item_t* item,
+         // into this array because if there are extra items, they will cause a
+         // syntax error when decoded.
+         CBOR_ASSERT(ctx->stack->top->subitems > 0);
+-        // This should never happen since the definite array should be
+-        // preallocated for the expected number of items.
+-        if (!cbor_array_push(ctx->stack->top->item, item)) {
++        cbor_item_t* array = ctx->stack->top->item;
++        struct _cbor_array_metadata* metadata = &array->metadata.array_metadata;
++        if (metadata->end_ptr == metadata->allocated &&
++            !_cbor_builder_grow(array, sizeof(cbor_item_t*),
++                                &metadata->allocated, metadata->end_ptr,
++                                ctx->stack->top->subitems)) {
++          ctx->creation_failed = true;
++          cbor_decref(&item);
++          break;
++        }
++        if (!cbor_array_push(array, item)) {
+           ctx->creation_failed = true;
+           cbor_decref(&item);
+           break;
+         }
+         cbor_decref(&item);
+-        ctx->stack->top->subitems--;
++        _cbor_owed_decrement(ctx);
+         if (ctx->stack->top->subitems == 0) {
+           cbor_item_t* stack_item = ctx->stack->top->item;
+           _cbor_stack_pop(ctx->stack);
+@@ -73,7 +138,18 @@ void _cbor_builder_append(cbor_item_t* item,
+         CBOR_ASSERT(!ctx->creation_failed);
+       } else {
+         // Even record, this is a key.
+-        if (!_cbor_map_add_key(ctx->stack->top->item, item)) {
++        cbor_item_t* map = ctx->stack->top->item;
++        struct _cbor_map_metadata* metadata = &map->metadata.map_metadata;
++        if (cbor_map_is_definite(map) &&
++            metadata->end_ptr == metadata->allocated &&
++            !_cbor_builder_grow(map, sizeof(struct cbor_pair),
++                                &metadata->allocated, metadata->end_ptr,
++                                ctx->stack->top->subitems / 2)) {
++          ctx->creation_failed = true;
++          cbor_decref(&item);
++          break;
++        }
++        if (!_cbor_map_add_key(map, item)) {
+           ctx->creation_failed = true;
+           cbor_decref(&item);
+           break;
+@@ -82,7 +158,7 @@ void _cbor_builder_append(cbor_item_t* item,
+       cbor_decref(&item);
+       if (cbor_map_is_definite(ctx->stack->top->item)) {
+         CBOR_ASSERT(ctx->stack->top->subitems > 0);
+-        ctx->stack->top->subitems--;
++        _cbor_owed_decrement(ctx);
+         if (ctx->stack->top->subitems == 0) {
+           cbor_item_t* map_entry = ctx->stack->top->item;
+           _cbor_stack_pop(ctx->stack);
+@@ -302,10 +378,15 @@ void cbor_builder_string_start_callback(void* context) {
+ void cbor_builder_array_start_callback(void* context, uint64_t size) {
+   struct _cbor_decoder_context* ctx = context;
+   CHECK_LENGTH(ctx, size);
+-  cbor_item_t* res = cbor_new_definite_array(size);
++  // Preallocate only what the input can hold. A header claiming more items
++  // than that describes input that will fail to decode; the array grows on
++  // demand until it does, so the error is the same as without the cap.
++  size_t budget = _cbor_claim_budget(ctx);
++  cbor_item_t* res = cbor_new_definite_array(size < budget ? size : budget);
+   CHECK_RES(ctx, res);
+   if (size > 0) {
+     PUSH_CTX_STACK(ctx, res, size);
++    ctx->owed += _cbor_owed(ctx, size);
+   } else {
+     _cbor_builder_append(res, ctx);
+   }
+@@ -334,10 +415,13 @@ void cbor_builder_map_start_callback(void* context, uint64_t size) {
+     ctx->creation_failed = true;
+     return;
+   }
+-  cbor_item_t* res = cbor_new_definite_map(size);
++  // As for arrays; each pair takes at least two bytes.
++  size_t budget = _cbor_claim_budget(ctx) / 2;
++  cbor_item_t* res = cbor_new_definite_map(size < budget ? size : budget);
+   CHECK_RES(ctx, res);
+   if (size > 0) {
+     PUSH_CTX_STACK(ctx, res, size * 2);
++    ctx->owed += _cbor_owed(ctx, size * 2);
+   } else {
+     _cbor_builder_append(res, ctx);
+   }
+diff --git a/src/cbor/internal/builder_callbacks.h b/src/cbor/internal/builder_callbacks.h
+index 587ad99..c17f834 100644
+--- a/src/cbor/internal/builder_callbacks.h
++++ b/src/cbor/internal/builder_callbacks.h
+@@ -22,6 +22,15 @@ struct _cbor_decoder_context {
+   bool syntax_error;
+   cbor_item_t* root;
+   struct _cbor_stack* stack;
++  /** Size of the whole input */
++  size_t source_size;
++  /** Input bytes left, starting at the item being decoded */
++  size_t remaining;
++  /**
++   * Bytes the open definite containers still need, beyond the item in
++   * progress in each. See `_cbor_claim_budget`.
++   */
++  uint64_t owed;
+ };
+ 
+ /** Internal helper: Append item to the top of the stack while handling errors.
+diff --git a/test/bad_inputs_test.c b/test/bad_inputs_test.c
+index e346a78..8e33bbd 100644
+--- a/test/bad_inputs_test.c
++++ b/test/bad_inputs_test.c
+@@ -4,6 +4,8 @@
+  */
+ 
+ #include "assertions.h"
++#include <stdlib.h>
++
+ #include "cbor.h"
+ 
+ /* These tests verify behavior on interesting randomly generated inputs from the
+@@ -42,16 +44,18 @@ unsigned char data4[] = {0xBA, 0xC1, 0xE8, 0x3E, 0xE7, 0x20, 0xA8};
+ static void test_4(void** _state _CBOR_UNUSED) {
+   item = cbor_load(data4, 7, &res);
+   assert_null(item);
+-  assert_true(res.error.code == CBOR_ERR_MEMERROR);
+-  assert_size_equal(res.error.position, 5);
++  /* The claimed 3.2e9 pairs are not preallocated, so decoding runs until the
++   * data does */
++  assert_true(res.error.code == CBOR_ERR_NOTENOUGHDATA);
++  assert_size_equal(res.error.position, 7);
+ }
+ 
+ unsigned char data5[] = {0x9A, 0xDA, 0x3A, 0xB2, 0x7F, 0x29};
+ static void test_5(void** _state _CBOR_UNUSED) {
+-  assert_true(res.error.code == CBOR_ERR_MEMERROR);
+   item = cbor_load(data5, 6, &res);
++  assert_true(res.error.code == CBOR_ERR_NOTENOUGHDATA);
+   assert_null(item);
+-  assert_size_equal(res.error.position, 5);
++  assert_size_equal(res.error.position, 6);
+   /* Indef string expectation mismatch */
+ }
+ #endif
+@@ -72,8 +76,9 @@ unsigned char data7[] = {0xA2, 0x9B, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00,
+ static void test_7(void** _state _CBOR_UNUSED) {
+   item = cbor_load(data7, 16, &res);
+   assert_null(item);
+-  assert_true(res.error.code == CBOR_ERR_MEMERROR);
+-  assert_size_equal(res.error.position, 10);
++  /* The array is not preallocated, so decoding runs until the data does */
++  assert_true(res.error.code == CBOR_ERR_NOTENOUGHDATA);
++  assert_size_equal(res.error.position, 16);
+ }
+ #endif
+ 
+@@ -97,6 +102,85 @@ static void test_9(void** _state _CBOR_UNUSED) {
+   assert_size_equal(res.error.position, 3);
+ }
+ 
++/* Definite headers claiming more items than the input holds get storage only
++ * for what the input can hold (#418). */
++static size_t claim_allocated;
++static void* claim_malloc(size_t size) {
++  if (size > claim_allocated) claim_allocated = size;
++  return malloc(size);
++}
++static void* claim_realloc(void* ptr, size_t size) {
++  if (size > claim_allocated) claim_allocated = size;
++  return realloc(ptr, size);
++}
++
++static void assert_claim_bounded(const unsigned char* data, size_t len,
++                                 size_t position) {
++  claim_allocated = 0;
++  cbor_set_allocs(claim_malloc, claim_realloc, free);
++  item = cbor_load(data, len, &res);
++  cbor_set_allocs(malloc, realloc, free);
++  assert_null(item);
++  assert_true(res.error.code == CBOR_ERR_NOTENOUGHDATA);
++  assert_size_equal(res.error.position, position);
++  assert_true(claim_allocated < 1024);
++}
++
++unsigned char claim_array[] = {0x9A, 0x11, 0x27, 0x00, 0x00};
++unsigned char claim_map[] = {0xBA, 0x10, 0x00, 0x00, 0x00};
++/* An oversized claim inside open containers */
++unsigned char claim_nested[] = {0x84, 0x83, 0x82, 0x9A, 0x01, 0x00, 0x00, 0x00};
++/* Many oversized claims, each nested in the previous one */
++unsigned char claim_chain[] = {0x9A, 0x01, 0x00, 0x00, 0x00, 0x9A, 0x01, 0x00,
++                               0x00, 0x00, 0x9A, 0x01, 0x00, 0x00, 0x00, 0x9A,
++                               0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
++static void test_claims(void** _state _CBOR_UNUSED) {
++  assert_claim_bounded(claim_array, sizeof(claim_array), 5);
++  assert_claim_bounded(claim_map, sizeof(claim_map), 5);
++  assert_claim_bounded(claim_nested, sizeof(claim_nested), 8);
++  assert_claim_bounded(claim_chain, sizeof(claim_chain), sizeof(claim_chain));
++}
++
++/* Exactly enough bytes, deeply nested: must still decode */
++unsigned char claim_tight[] = {0x81, 0x81, 0x81, 0x82, 0x00, 0xA1, 0x00, 0x00};
++static void test_claims_tight(void** _state _CBOR_UNUSED) {
++  item = cbor_load(claim_tight, sizeof(claim_tight), &res);
++  assert_non_null(item);
++  assert_size_equal(res.read, sizeof(claim_tight));
++  cbor_decref(&item);
++  /* One byte short is a plain truncation */
++  item = cbor_load(claim_tight, sizeof(claim_tight) - 1, &res);
++  assert_null(item);
++  assert_true(res.error.code == CBOR_ERR_NOTENOUGHDATA);
++  assert_size_equal(res.error.position, sizeof(claim_tight) - 1);
++}
++
++/* The inner container claims more than is left once the outer one's second
++ * item is set aside, so it starts short, grows, and is completed; the input
++ * then ends before the outer container does. */
++unsigned char claim_grow_array[] = {0x82, 0x83, 0x01, 0x02, 0x03};
++unsigned char claim_grow_map[] = {0x82, 0xA2, 0x01, 0x02, 0x03, 0x04};
++/* Same shape with the outer item present: decodes */
++unsigned char claim_grow_done[] = {0x82, 0x83, 0x01, 0x02, 0x03,
++                                   0xA2, 0x01, 0x02, 0x03, 0x04};
++static void test_claims_grow(void** _state _CBOR_UNUSED) {
++  item = cbor_load(claim_grow_array, sizeof(claim_grow_array), &res);
++  assert_null(item);
++  assert_true(res.error.code == CBOR_ERR_NOTENOUGHDATA);
++  assert_size_equal(res.error.position, sizeof(claim_grow_array));
++  item = cbor_load(claim_grow_map, sizeof(claim_grow_map), &res);
++  assert_null(item);
++  assert_true(res.error.code == CBOR_ERR_NOTENOUGHDATA);
++  assert_size_equal(res.error.position, sizeof(claim_grow_map));
++  item = cbor_load(claim_grow_done, sizeof(claim_grow_done), &res);
++  assert_non_null(item);
++  assert_size_equal(cbor_array_size(item), 2);
++  assert_size_equal(cbor_array_size(cbor_array_handle(item)[0]), 3);
++  assert_size_equal(cbor_array_allocated(cbor_array_handle(item)[0]), 3);
++  assert_size_equal(cbor_map_size(cbor_array_handle(item)[1]), 2);
++  cbor_decref(&item);
++}
++
+ int main(void) {
+   const struct CMUnitTest tests[] = {
+       cmocka_unit_test(test_1), cmocka_unit_test(test_2),
+@@ -109,6 +193,8 @@ int main(void) {
+       cmocka_unit_test(test_7),
+ #endif
+       cmocka_unit_test(test_8), cmocka_unit_test(test_9),
++      cmocka_unit_test(test_claims), cmocka_unit_test(test_claims_tight),
++      cmocka_unit_test(test_claims_grow),
+   };
+   return cmocka_run_group_tests(tests, NULL, NULL);
+ }

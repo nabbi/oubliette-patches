@@ -1,0 +1,370 @@
+From 04c29ab339550294f36873862c5da4c537e85ee3 Mon Sep 17 00:00:00 2001
+From: Nic Boet <nic@boet.cc>
+Date: Mon, 26 Oct 2026 18:42:09 -0500
+Subject: [PATCH] manual: do not parse the pasted authenticator data as CBOR
+
+In manual mode, manual_get_assert() base64-decodes the authenticator
+data the user pastes and hands it to fido_assert_set_authdata(), which
+parses it with libcbor's cbor_load(). libcbor preallocates definite
+arrays and maps from the header count before reading any element
+(PJK/libcbor#418), so a short pasted value makes the PAM process
+request gigabytes. Over sshd keyboard-interactive this is reachable by
+a remote user before any credential is accepted.
+
+Unwrap the CBOR byte string locally (definite length, exactly the
+remaining input, nothing else accepted) and pass the payload to
+fido_assert_set_authdata_raw(), available since libfido2 1.3.0, which
+builds its own well-formed encoding. Bytes typed by the user never
+reach cbor_load(). Valid input decodes exactly as before.
+
+No allocator is installed and no process limit is changed, unlike the
+approaches declined in #394 and Yubico/libfido2#985.
+
+tests/manual_authdata.c covers the one-, two-, three-, five- and
+nine-byte header forms, rejects other major types, indefinite and
+reserved headers, length mismatches and truncation, and shows with a
+guard allocator that the new path requests nothing large where the
+old one did.
+
+Co-Authored-By: Claude Mythos 5.1 <noreply@anthropic.com>
+---
+ NEWS                    |   6 ++
+ tests/CMakeLists.txt    |   8 ++
+ tests/Makefile.am       |   5 ++
+ tests/manual_authdata.c | 168 ++++++++++++++++++++++++++++++++++++++++
+ util.c                  |  63 ++++++++++++++-
+ util.h                  |   2 +
+ 6 files changed, 251 insertions(+), 1 deletion(-)
+ create mode 100644 tests/manual_authdata.c
+
+diff --git a/NEWS b/NEWS
+index 6f94a89..964f546 100644
+--- a/NEWS
++++ b/NEWS
+@@ -2,6 +2,12 @@ Copyright (c) 2014-2025 Yubico AB - See COPYING
+ 
+ pam-u2f NEWS -- History of user-visible changes.          -*- outline -*-
+ 
++* Version 1.4.1 (unreleased)
++** Manual mode no longer parses the pasted authenticator data as CBOR.
++The byte-string wrapper is unwrapped locally and the raw bytes are passed
++to libfido2, so a crafted paste can no longer make the PAM process
++allocate memory proportional to a declared element count.
++
+ * Version 1.4.0 (released 2025-03-25)
+ ** Add module configuration file support (default: /etc/security/pam_u2f.conf).
+ ** Add support for building in CMake. This deprecates the autotools build
+diff --git a/tests/CMakeLists.txt b/tests/CMakeLists.txt
+index 91b5fda..9811dcb 100644
+--- a/tests/CMakeLists.txt
++++ b/tests/CMakeLists.txt
+@@ -79,6 +79,14 @@ target_link_libraries(get_devices PRIVATE
+ )
+ add_test(NAME get_devices COMMAND get_devices)
+ 
++add_executable(manual_authdata manual_authdata.c)
++target_link_libraries(manual_authdata PRIVATE
++	common
++	pam_u2f_testing
++	cbor
++)
++add_test(NAME manual_authdata COMMAND manual_authdata)
++
+ add_executable(expand expand.c)
+ target_link_libraries(expand PRIVATE
+ 	common
+diff --git a/tests/Makefile.am b/tests/Makefile.am
+index de6dfdd..2182242 100644
+--- a/tests/Makefile.am
++++ b/tests/Makefile.am
+@@ -19,6 +19,11 @@ check_PROGRAMS += expand
+ expand_SOURCES = expand.c mock_syslog.c
+ expand_LDADD = $(top_builddir)/libmodule.la
+ 
++check_PROGRAMS += manual_authdata
++manual_authdata_SOURCES = manual_authdata.c
++manual_authdata_CFLAGS = $(LIBFIDO2_CFLAGS) $(AM_CFLAGS)
++manual_authdata_LDADD = $(top_builddir)/libmodule.la $(LIBFIDO2_LIBS) -lcbor
++
+ check_PROGRAMS += cfg
+ cfg_SOURCES = ./cfg.c ../cfg.c ../logging.c
+ cfg_CFLAGS = -DPAM_U2F_TESTING -DSCONFDIR='"@SCONFDIR@"' $(AM_CFLAGS)
+diff --git a/tests/manual_authdata.c b/tests/manual_authdata.c
+new file mode 100644
+index 0000000..e5d934a
+--- /dev/null
++++ b/tests/manual_authdata.c
+@@ -0,0 +1,168 @@
++/*
++ *  Copyright (C) 2026 Yubico AB - See COPYING
++ *
++ *  Manual mode hands the user's pasted authenticator data to libfido2.
++ *  unwrap_cbor_bytestring() must accept exactly the byte-string encodings
++ *  fido2-assert(1) emits and reject everything else, so that the bytes
++ *  never reach cbor_load() (PJK/libcbor#418).
++ */
++
++#undef NDEBUG
++#include <assert.h>
++#include <stdint.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++
++#include <cbor.h>
++#include <fido.h>
++
++#include "../util.h"
++
++static const unsigned char payload[37] = {
++  0x49, 0x96, 0x0d, 0xe5, 0x88, 0x0e, 0x8c, 0x68, 0x74, 0x34, 0x17, 0x0f,
++  0x64, 0x76, 0x60, 0x5b, 0x8f, 0xe4, 0xae, 0xb9, 0xa2, 0x86, 0x32, 0xc7,
++  0x99, 0x5c, 0xf3, 0xba, 0x83, 0x1d, 0x97, 0x63, 0x01, 0x00, 0x00, 0x00,
++  0x2a,
++};
++
++static void accept(const unsigned char *hdr, size_t hdr_len,
++                   const unsigned char *data, size_t data_len) {
++  unsigned char buf[4096];
++  const unsigned char *out = NULL;
++  size_t out_len = 0;
++
++  assert(hdr_len + data_len <= sizeof(buf));
++  memcpy(buf, hdr, hdr_len);
++  memcpy(buf + hdr_len, data, data_len);
++  assert(unwrap_cbor_bytestring(buf, hdr_len + data_len, &out, &out_len) == 1);
++  assert(out == buf + hdr_len);
++  assert(out_len == data_len);
++  assert(memcmp(out, data, data_len) == 0);
++}
++
++static void reject(const unsigned char *in, size_t in_len) {
++  const unsigned char *out = (const unsigned char *) 0x1;
++  size_t out_len = 1;
++
++  assert(unwrap_cbor_bytestring(in, in_len, &out, &out_len) == 0);
++}
++
++static void test_accepts_fido2_assert_encodings(void) {
++  /* one-byte header, length in the initial byte (0..23) */
++  const unsigned char h1[] = {0x40 + 23};
++  /* two-byte header: what fido2-assert emits for 37-byte authenticator
++   * data, the smallest valid size */
++  const unsigned char h2[] = {0x58, 37};
++  /* three-byte header, 300 bytes: authenticator data with extensions */
++  const unsigned char h3[] = {0x59, 0x01, 0x2c};
++  /* five- and nine-byte headers are legal encodings of the same length */
++  const unsigned char h5[] = {0x5a, 0x00, 0x00, 0x00, 37};
++  const unsigned char h9[] = {0x5b, 0, 0, 0, 0, 0, 0, 0, 37};
++  const unsigned char empty[] = {0x40};
++  unsigned char big[300];
++
++  memset(big, 0xa5, sizeof(big));
++  accept(h1, sizeof(h1), payload, 23);
++  accept(h2, sizeof(h2), payload, sizeof(payload));
++  accept(h3, sizeof(h3), big, sizeof(big));
++  accept(h5, sizeof(h5), payload, sizeof(payload));
++  accept(h9, sizeof(h9), payload, sizeof(payload));
++  accept(empty, sizeof(empty), payload, 0);
++}
++
++static void test_rejects_everything_else(void) {
++  /* the libcbor#418 input: an array header, not a byte string */
++  const unsigned char array[] = {0x9a, 0x11, 0x27, 0x00, 0x00};
++  /* a map header */
++  const unsigned char map[] = {0xba, 0x10, 0x00, 0x00, 0x00};
++  /* a text string of the right length is still the wrong type */
++  const unsigned char text[] = {0x61, 'x'};
++  /* indefinite-length byte string */
++  const unsigned char indef[] = {0x5f, 0x41, 0x00, 0xff};
++  /* reserved additional information values */
++  const unsigned char res28[] = {0x5c, 0x00};
++  const unsigned char res30[] = {0x5e, 0x00};
++  /* declared length longer than the input */
++  const unsigned char longer[] = {0x58, 38, 0x00};
++  const unsigned char huge[] = {0x5b, 0xff, 0xff, 0xff, 0xff,
++                                0xff, 0xff, 0xff, 0xff};
++  /* declared length shorter than the input: trailing bytes */
++  const unsigned char shorter[] = {0x41, 0x00, 0x00};
++  /* truncated multi-byte headers */
++  const unsigned char trunc2[] = {0x58};
++  const unsigned char trunc9[] = {0x5b, 0, 0, 0, 0};
++  const unsigned char *out = NULL;
++  size_t out_len = 0;
++
++  reject(array, sizeof(array));
++  reject(map, sizeof(map));
++  reject(text, sizeof(text));
++  reject(indef, sizeof(indef));
++  reject(res28, sizeof(res28));
++  reject(res30, sizeof(res30));
++  reject(longer, sizeof(longer));
++  reject(huge, sizeof(huge));
++  reject(shorter, sizeof(shorter));
++  reject(trunc2, sizeof(trunc2));
++  reject(trunc9, sizeof(trunc9));
++  reject(NULL, 0);
++  reject(array, 0);
++  (void) out;
++  (void) out_len;
++}
++
++/* libcbor must not be asked for memory on the manual path. Install a
++ * guard allocator and run the unwrapped payload through the libfido2
++ * call manual_get_assert() uses; then show the call it replaced would
++ * have requested memory for the libcbor#418 input. */
++static size_t biggest;
++static void *guard_malloc(size_t n) {
++  if (n > biggest)
++    biggest = n;
++  return n > 64 * 1024 ? NULL : malloc(n);
++}
++static void *guard_realloc(void *p, size_t n) {
++  if (n > biggest)
++    biggest = n;
++  return n > 64 * 1024 ? NULL : realloc(p, n);
++}
++
++static void test_raw_setter_allocates_nothing_large(void) {
++  const unsigned char array[] = {0x9a, 0x11, 0x27, 0x00, 0x00};
++  fido_assert_t *assert_ = NULL;
++  const unsigned char *out = NULL;
++  size_t out_len = 0;
++  unsigned char wrapped[2 + sizeof(payload)] = {0x58, sizeof(payload)};
++
++  memcpy(wrapped + 2, payload, sizeof(payload));
++  cbor_set_allocs(guard_malloc, guard_realloc, free);
++  fido_init(0);
++
++  assert_ = fido_assert_new();
++  assert(assert_ != NULL);
++  assert(fido_assert_set_count(assert_, 1) == FIDO_OK);
++
++  /* the new path: valid pasted data, nothing large requested */
++  biggest = 0;
++  assert(unwrap_cbor_bytestring(wrapped, sizeof(wrapped), &out, &out_len));
++  assert(fido_assert_set_authdata_raw(assert_, 0, out, out_len) == FIDO_OK);
++  assert(biggest <= 4096);
++
++  /* the old path on the libcbor#418 input: libfido2 asks libcbor for
++   * memory proportional to the declared count, which the guard refuses */
++  biggest = 0;
++  assert(fido_assert_set_authdata(assert_, 0, array, sizeof(array)) !=
++         FIDO_OK);
++  assert(biggest > 64 * 1024);
++
++  fido_assert_free(&assert_);
++  cbor_set_allocs(malloc, realloc, free);
++}
++
++int main(void) {
++  test_accepts_fido2_assert_encodings();
++  test_rejects_everything_else();
++  test_raw_setter_allocates_nothing_large();
++  return EXIT_SUCCESS;
++}
+diff --git a/util.c b/util.c
+index 97500f3..0f289bf 100644
+--- a/util.c
++++ b/util.c
+@@ -1474,6 +1474,54 @@ out:
+ 
+ #define MAX_PROMPT_LEN (1024)
+ 
++/* Unwrap a definite-length CBOR byte string (RFC 8949 major type 2).
++ * Accepts exactly one item whose declared length equals the remaining
++ * input; rejects indefinite-length strings, reserved additional
++ * information values, truncated headers and trailing data. On success
++ * *out points into in and *out_len is the payload length. */
++int unwrap_cbor_bytestring(const unsigned char *in, size_t in_len,
++                           const unsigned char **out, size_t *out_len) {
++  size_t hdr;
++  size_t len = 0;
++  size_t i;
++  unsigned char ai;
++
++  if (in == NULL || in_len == 0 || (in[0] & 0xe0) != 0x40)
++    return 0;
++
++  ai = in[0] & 0x1f;
++  if (ai < 24) {
++    hdr = 1;
++    len = ai;
++  } else if (ai == 24) {
++    hdr = 2;
++  } else if (ai == 25) {
++    hdr = 3;
++  } else if (ai == 26) {
++    hdr = 5;
++  } else if (ai == 27) {
++    hdr = 9;
++  } else {
++    return 0; /* 28-30 reserved, 31 indefinite */
++  }
++
++  if (in_len < hdr)
++    return 0;
++
++  for (i = 1; i < hdr; i++) {
++    if (len > (SIZE_MAX >> 8))
++      return 0;
++    len = (len << 8) | in[i];
++  }
++
++  if (len != in_len - hdr)
++    return 0;
++
++  *out = in + hdr;
++  *out_len = len;
++  return 1;
++}
++
+ static int manual_get_assert(const char *prompt, pam_handle_t *pamh,
+                              fido_assert_t *assert) {
+   char *b64_cdh = NULL;
+@@ -1482,7 +1530,9 @@ static int manual_get_assert(const char *prompt, pam_handle_t *pamh,
+   char *b64_sig = NULL;
+   unsigned char *authdata = NULL;
+   unsigned char *sig = NULL;
++  const unsigned char *raw = NULL;
+   size_t authdata_len;
++  size_t raw_len;
+   size_t sig_len;
+   int r;
+   int ok = 0;
+@@ -1508,7 +1558,18 @@ static int manual_get_assert(const char *prompt, pam_handle_t *pamh,
+     goto err;
+   }
+ 
+-  r = fido_assert_set_authdata(assert, 0, authdata, authdata_len);
++  /* The pasted value is a CBOR byte string wrapping the authenticator data,
++   * as fido2-assert(1) prints it. Unwrap it here and hand libfido2 the raw
++   * bytes: fido_assert_set_authdata() would parse the user's bytes with
++   * cbor_load(), which preallocates storage from unchecked header counts
++   * (PJK/libcbor#418), so a few pasted bytes could cost gigabytes.
++   * fido_assert_set_authdata_raw() builds its own encoding instead. */
++  if (!unwrap_cbor_bytestring(authdata, authdata_len, &raw, &raw_len)) {
++    LOG(LOG_DEBUG, "Authenticator data is not a definite CBOR byte string");
++    goto err;
++  }
++
++  r = fido_assert_set_authdata_raw(assert, 0, raw, raw_len);
+   if (r != FIDO_OK) {
+     LOG(LOG_DEBUG, "Failed to set authdata of assertion");
+     goto err;
+diff --git a/util.h b/util.h
+index 1745352..19a55c1 100644
+--- a/util.h
++++ b/util.h
+@@ -42,6 +42,8 @@ int do_authentication(const cfg_t *cfg, const device_t *devices,
+ int do_manual_authentication(const cfg_t *cfg, const device_t *devices,
+                              const unsigned n_devs, pam_handle_t *pamh);
+ char *converse(pam_handle_t *pamh, int echocode, const char *prompt);
++int unwrap_cbor_bytestring(const unsigned char *, size_t,
++                           const unsigned char **, size_t *);
+ int random_bytes(void *, size_t);
+ int cose_type(const char *, int *);
+ const char *cose_string(int);
+-- 
+2.55.0
+
